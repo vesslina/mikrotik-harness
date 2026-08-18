@@ -3,7 +3,8 @@ import asyncio
 from textual.widgets import DataTable, Input, Static
 
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
-from mth.ui.textual.app import DiscoveryApp
+from mth.core.registration import PendingRegistration, RegistrationResult
+from mth.ui.textual.app import DiscoveryApp, FingerprintScreen
 
 
 def _device() -> DeviceInfo:
@@ -65,7 +66,7 @@ def test_refresh_runs_discovery_again() -> None:
     asyncio.run(scenario())
 
 
-def test_connect_form_reports_backend_boundary() -> None:
+def test_connect_requires_password() -> None:
     async def scenario() -> None:
         app = DiscoveryApp(
             discoverer=lambda **_kwargs: DiscoveryResult(devices=()),
@@ -78,7 +79,74 @@ def test_connect_form_reports_backend_boundary() -> None:
             app.action_connect()
 
             status = str(app.query_one("#status", Static).content)
-            assert "Connection target ready" in status
-            assert "MikroMCP registration is the next Block A slice" in status
+            assert "non-empty RouterOS password" in status
+
+    asyncio.run(scenario())
+
+
+class _FakeRegistrar:
+    def __init__(self, *, already_trusted: bool) -> None:
+        self.already_trusted = already_trusted
+        self.registered = False
+
+    def prepare(self, **kwargs: object) -> PendingRegistration:
+        return PendingRegistration(
+            router_id="mikrotik-afe23e",
+            host=str(kwargs["host"]),
+            port=443,
+            username=str(kwargs["username"]),
+            password=str(kwargs["password"]),
+            ros_version="7.21.5",
+            tls_fingerprint="ab" * 32,
+            identity="MikroTik",
+            trusted_fingerprint=self.already_trusted,
+        )
+
+    async def register_and_verify(
+        self, pending: PendingRegistration
+    ) -> RegistrationResult:
+        self.registered = True
+        return RegistrationResult(
+            router_id=pending.router_id,
+            identity="MikroTik",
+            tool_count=122,
+            health={"healthy": True, "rosVersion": "7.21.5"},
+            system_status={
+                "sections": {
+                    "resource": {"version": "7.21.5", "cpu-load": "3"},
+                    "identity": {"name": "MikroTik"},
+                }
+            },
+        )
+
+
+def test_first_connection_requires_fingerprint_confirmation() -> None:
+    async def scenario() -> None:
+        registrar = _FakeRegistrar(already_trusted=False)
+        app = DiscoveryApp(
+            discoverer=lambda **_kwargs: DiscoveryResult(devices=(_device(),)),
+            registrar=registrar,
+            timeout=0.1,
+        )
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            app.query_one("#password", Input).value = "secret"
+            app.action_connect()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert isinstance(app.screen, FingerprintScreen)
+            assert registrar.registered is False
+            await pilot.click("#trust-fingerprint")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+
+            assert registrar.registered is True
+            assert "Connected to MikroTik" in str(app.query_one("#status", Static).content)
+            assert "Live MCP tools: 122" in str(
+                app.query_one("#backend-status", Static).content
+            )
+            assert app.query_one("#password", Input).value == ""
 
     asyncio.run(scenario())

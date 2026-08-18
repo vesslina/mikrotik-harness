@@ -3,5 +3,6 @@
 /.mypy_cache/
 /.pytest_cache/
 /.ruff_cache/
+/.mth/
 **/__pycache__/
 *.egg-info/

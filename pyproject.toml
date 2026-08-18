@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+  "mcp>=1.13,<2",
+  "PyYAML>=6.0,<7",
   "textual>=8.2.8,<9",
 ]
 
@@ -18,6 +20,7 @@ dev = [
   "mypy>=1.11",
   "pytest>=8.3",
   "ruff>=0.6",
+  "types-PyYAML>=6.0",
 ]
 
 [project.scripts]

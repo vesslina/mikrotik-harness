@@ -1,0 +1,3 @@
+[submodule "external/mikromcp"]
+	path = external/mikromcp
+	url = https://github.com/AliKarami/MikroMCP.git

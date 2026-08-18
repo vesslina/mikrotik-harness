@@ -1,15 +1,96 @@
+import asyncio
 from collections.abc import Callable, Iterable
+from typing import Protocol
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Center, Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
 from mth.core.discovery import DiscoveryError, discover_devices
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
+from mth.core.registration import (
+    PendingRegistration,
+    RegistrationError,
+    RegistrationErrorCode,
+    RegistrationResult,
+    RegistrationService,
+)
 
 Discoverer = Callable[..., DiscoveryResult]
+
+
+class Registrar(Protocol):
+    def prepare(
+        self,
+        *,
+        host: str,
+        username: str,
+        password: str,
+        device: DeviceInfo | None = None,
+        port: int = 443,
+    ) -> PendingRegistration: ...
+
+    async def register_and_verify(
+        self, pending: PendingRegistration
+    ) -> RegistrationResult: ...
+
+
+class FingerprintScreen(ModalScreen[bool]):
+    """Explicit trust-on-first-use gate for a RouterOS TLS certificate."""
+
+    CSS = """
+    FingerprintScreen {
+        align: center middle;
+    }
+
+    #fingerprint-dialog {
+        width: 86;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+
+    #fingerprint-value {
+        margin: 1 0;
+        color: $warning;
+    }
+
+    #fingerprint-actions {
+        height: auto;
+        align-horizontal: right;
+    }
+
+    #fingerprint-actions Button {
+        margin-left: 1;
+    }
+    """
+
+    def __init__(self, pending: PendingRegistration) -> None:
+        super().__init__()
+        self._pending = pending
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="fingerprint-dialog"):
+            yield Static(
+                "First connection: verify this RouterOS TLS SHA-256 fingerprint "
+                "against a trusted source before accepting.",
+                markup=False,
+            )
+            yield Static(self._pending.display_fingerprint, id="fingerprint-value", markup=False)
+            yield Static(
+                f"Target: {self._pending.host}:{self._pending.port}",
+                markup=False,
+            )
+            with Center(id="fingerprint-actions"):
+                yield Button("Cancel", id="reject-fingerprint")
+                yield Button("Trust and connect", id="trust-fingerprint", variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "trust-fingerprint")
 
 
 class DiscoveryApp(App[None]):
@@ -81,6 +162,7 @@ class DiscoveryApp(App[None]):
         broadcasts: Iterable[str] | None = None,
         port: int = 5678,
         active: bool = True,
+        registrar: Registrar | None = None,
     ) -> None:
         super().__init__()
         self._discoverer = discoverer
@@ -89,7 +171,9 @@ class DiscoveryApp(App[None]):
         self._broadcasts = tuple(broadcasts) if broadcasts is not None else None
         self._port = port
         self._active = active
+        self._registrar = registrar or RegistrationService()
         self._devices: dict[str, DeviceInfo] = {}
+        self._selected_device: DeviceInfo | None = None
         self._discovery_generation = 0
 
     def compose(self) -> ComposeResult:
@@ -108,6 +192,11 @@ class DiscoveryApp(App[None]):
                     yield Label("Password")
                     yield Input(password=True, placeholder="RouterOS password", id="password")
             yield Button("Connect", id="connect", variant="primary")
+            yield Static(
+                "Backend not connected. Discovery data is untrusted.",
+                id="backend-status",
+                markup=False,
+            )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -194,6 +283,7 @@ class DiscoveryApp(App[None]):
             return
         address = self._device_address(device)
         if address:
+            self._selected_device = device
             self.query_one("#connect-to", Input).value = address
             self._set_status(
                 f"Selected {device.identity or device.mac or address} at {address}."
@@ -217,11 +307,103 @@ class DiscoveryApp(App[None]):
         if not login:
             self._set_status("Enter a RouterOS login.")
             return
+        password = self.query_one("#password", Input).value
+        if not password:
+            self._set_status("Enter a non-empty RouterOS password.")
+            return
 
-        self._set_status(
-            f"Connection target ready: {target} as {login}. "
-            "MikroMCP registration is the next Block A slice."
+        device = self._selected_device
+        if device is not None and self._device_address(device) != target:
+            device = None
+        self._set_connecting(True)
+        self._set_status(f"Connecting to {target} through MikroMCP…")
+        self._prepare_registration(target, login, password, device)
+
+    @work(thread=True, exclusive=True, group="registration", exit_on_error=False)
+    def _prepare_registration(
+        self,
+        target: str,
+        login: str,
+        password: str,
+        device: DeviceInfo | None,
+    ) -> None:
+        try:
+            pending = self._registrar.prepare(
+                host=target,
+                username=login,
+                password=password,
+                device=device,
+            )
+        except RegistrationError as error:
+            self.call_from_thread(self._show_registration_error, error)
+            return
+        except Exception as error:  # defensive UI boundary
+            wrapped = RegistrationError(
+                RegistrationErrorCode.BACKEND_UNAVAILABLE,
+                f"Unexpected registration error: {error}",
+            )
+            self.call_from_thread(self._show_registration_error, wrapped)
+            return
+        self.call_from_thread(self._review_fingerprint, pending)
+
+    def _review_fingerprint(self, pending: PendingRegistration) -> None:
+        self.query_one("#password", Input).value = ""
+        if pending.trusted_fingerprint:
+            self._verify_registration(pending)
+            return
+        self._set_status("TLS fingerprint captured. Confirm it before registration.")
+        self.push_screen(
+            FingerprintScreen(pending),
+            lambda trusted: self._fingerprint_decided(pending, bool(trusted)),
         )
+
+    def _fingerprint_decided(self, pending: PendingRegistration, trusted: bool) -> None:
+        if not trusted:
+            self._set_connecting(False)
+            self._set_status("Connection cancelled; TLS fingerprint was not trusted.")
+            return
+        self._set_status("Fingerprint trusted. Registering router with MikroMCP…")
+        self._verify_registration(pending)
+
+    @work(thread=True, exclusive=True, group="registration", exit_on_error=False)
+    def _verify_registration(self, pending: PendingRegistration) -> None:
+        try:
+            result = asyncio.run(self._registrar.register_and_verify(pending))
+        except RegistrationError as error:
+            self.call_from_thread(self._show_registration_error, error)
+            return
+        except Exception as error:  # defensive UI boundary
+            wrapped = RegistrationError(
+                RegistrationErrorCode.BACKEND_HEALTH_FAILED,
+                f"Unexpected backend error: {error}",
+            )
+            self.call_from_thread(self._show_registration_error, wrapped)
+            return
+        self.call_from_thread(self._show_connected, result)
+
+    def _show_connected(self, result: RegistrationResult) -> None:
+        self._set_connecting(False)
+        self._set_status(f"Connected to {result.identity} via MikroMCP.")
+        status = result.system_status
+        sections = status.get("sections", {})
+        resource = sections.get("resource", {}) if isinstance(sections, dict) else {}
+        cpu = resource.get("cpu-load", "?") if isinstance(resource, dict) else "?"
+        version = (
+            resource.get("version", result.health.get("rosVersion", "?"))
+            if isinstance(resource, dict)
+            else result.health.get("rosVersion", "?")
+        )
+        self.query_one("#backend-status", Static).update(
+            f"Router ID: {result.router_id} | RouterOS: {version} | CPU: {cpu} | "
+            f"Live MCP tools: {result.tool_count}"
+        )
+
+    def _show_registration_error(self, error: RegistrationError) -> None:
+        self._set_connecting(False)
+        self._set_status(f"{error.code}: {error}")
+
+    def _set_connecting(self, connecting: bool) -> None:
+        self.query_one("#connect", Button).disabled = connecting
 
     def _set_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
