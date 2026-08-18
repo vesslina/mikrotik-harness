@@ -1,8 +1,8 @@
 # MikroTik Harness
 
 `mth` is a safety-oriented harness for managing RouterOS through typed runbooks. The current
-implementation covers the first Block A slice: discovering MikroTik devices in the local Layer 2
-broadcast domain with MNDP.
+implementation covers the discovery and terminal-UI slices of Block A: discovering MikroTik
+devices in the local Layer 2 broadcast domain with MNDP and selecting a connection target.
 
 ## Development setup
 
@@ -11,12 +11,24 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-## Discovery
+## Terminal UI
+
+Launch the interactive interface:
+
+```powershell
+mth
+```
+
+The table is populated in the background. Use the arrow keys to select a device, `Tab` to move
+through the connection fields, `r` to refresh, and `q` to quit. The password field is masked.
+Selecting and validating a connection target is implemented; MikroMCP registration is the next
+Block A slice and the UI does not report a connection before that backend exists.
+
+## Headless discovery
 
 Run an active MNDP probe and listen for replies for three seconds:
 
 ```powershell
-mth
 mth discover
 mth discover --json
 ```

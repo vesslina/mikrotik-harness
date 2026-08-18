@@ -12,16 +12,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mth",
         description=(
-            "Discover MikroTik devices in the local Layer 2 broadcast domain using MNDP. "
-            "Discovery data is an untrusted self-announcement, not authentication."
+            "Discover and connect to MikroTik RouterOS devices. Discovery data is an "
+            "untrusted self-announcement, not authentication."
         ),
     )
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("discover",),
-        default="discover",
-        help="command to run (default: discover)",
+        choices=("tui", "discover"),
+        default="tui",
+        help="interface to run (default: tui)",
     )
     parser.add_argument("--timeout", type=float, default=3.0, help="listen duration in seconds")
     parser.add_argument(
@@ -51,9 +51,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
+
+def run_tui(
+    *,
+    timeout: float,
+    bind_address: str,
+    broadcasts: tuple[str, ...] | None,
+    port: int,
+    active: bool,
+) -> int:
+    """Launch the optional UI adapter without importing Textual into the core package."""
+
+    from mth.ui.textual.app import DiscoveryApp
+
+    DiscoveryApp(
+        timeout=timeout,
+        bind_address=bind_address,
+        broadcasts=broadcasts,
+        port=port,
+        active=active,
+    ).run()
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     broadcasts = tuple(args.broadcasts) if args.broadcasts else None
+
+    if args.command == "tui":
+        if args.as_json:
+            parser.error("--json is only available with the discover command")
+        return run_tui(
+            timeout=args.timeout,
+            bind_address=args.bind_address,
+            broadcasts=broadcasts,
+            port=args.port,
+            active=not args.listen_only,
+        )
 
     try:
         result = discover_devices(
@@ -99,6 +134,7 @@ def _emit_error(code: DiscoveryErrorCode, message: str, *, as_json: bool) -> Non
         print(json.dumps({"error": {"code": code, "message": message}}, indent=2))
     else:
         print(f"{code}: {message}", file=sys.stderr)
+
 
 def _format_table(devices: tuple[DeviceInfo, ...]) -> str:
     headers = ("MAC", "IP", "IDENTITY", "VERSION", "BOARD", "INTERFACE")

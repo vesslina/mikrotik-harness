@@ -33,5 +33,24 @@ def test_cli_returns_stable_timeout_error(monkeypatch, capsys) -> None:
         lambda **_kwargs: DiscoveryResult(devices=()),
     )
 
-    assert cli.main(["--timeout", "0.1"]) == 2
+    assert cli.main(["discover", "--timeout", "0.1"]) == 2
     assert "DISCOVERY_TIMEOUT" in capsys.readouterr().err
+
+
+def test_cli_launches_tui_by_default(monkeypatch) -> None:
+    received: dict[str, object] = {}
+
+    def fake_run_tui(**kwargs: object) -> int:
+        received.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_tui", fake_run_tui)
+
+    assert cli.main([]) == 0
+    assert received == {
+        "timeout": 3.0,
+        "bind_address": "0.0.0.0",
+        "broadcasts": None,
+        "port": 5678,
+        "active": True,
+    }
