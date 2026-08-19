@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 
 import pytest
 import yaml
@@ -12,6 +13,7 @@ from mth.core.registration import (
     RegistrationError,
     RegistrationErrorCode,
     RegistrationService,
+    capture_tls_fingerprint,
 )
 
 
@@ -24,6 +26,38 @@ def _device(version: str = "7.21.5 (long-term)") -> DeviceInfo:
         board="CHR",
         source_ip="192.168.56.103",
     )
+
+
+def test_tls_handshake_failure_identifies_wrong_routeros_service(monkeypatch) -> None:
+    def fail_connection(*_args, **_kwargs):
+        raise ssl.SSLError("handshake failure")
+
+    monkeypatch.setattr(
+        "mth.core.registration.service.socket.create_connection",
+        fail_connection,
+    )
+
+    with pytest.raises(RegistrationError) as raised:
+        capture_tls_fingerprint("192.168.56.103")
+
+    assert raised.value.code == RegistrationErrorCode.REST_API_DISABLED
+    assert "www-ssl, not api-ssl" in str(raised.value)
+
+
+def test_refused_tls_connection_recommends_www_ssl(monkeypatch) -> None:
+    def refuse_connection(*_args, **_kwargs):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(
+        "mth.core.registration.service.socket.create_connection",
+        refuse_connection,
+    )
+
+    with pytest.raises(RegistrationError) as raised:
+        capture_tls_fingerprint("192.168.56.103")
+
+    assert raised.value.code == RegistrationErrorCode.REST_API_DISABLED
+    assert "HTTPS REST service www-ssl" in str(raised.value)
 
 
 def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_path) -> None:

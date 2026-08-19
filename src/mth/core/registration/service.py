@@ -34,15 +34,26 @@ def capture_tls_fingerprint(host: str, port: int = 443, timeout: float = 4.0) ->
             context.wrap_socket(raw_socket, server_hostname=host) as tls_socket,
         ):
             certificate = tls_socket.getpeercert(binary_form=True)
-    except (TimeoutError, ConnectionError, OSError, ssl.SSLError) as error:
+    except ssl.SSLError as error:
         raise RegistrationError(
             RegistrationErrorCode.REST_API_DISABLED,
-            f"RouterOS api-ssl is not reachable at {host}:{port}: {error}",
+            (
+                f"TLS handshake failed at {host}:{port}. RouterOS REST is served by "
+                f"www-ssl, not api-ssl. Configure www-ssl with a certificate: {error}"
+            ),
+        ) from error
+    except (TimeoutError, ConnectionError, OSError) as error:
+        raise RegistrationError(
+            RegistrationErrorCode.REST_API_DISABLED,
+            (
+                f"RouterOS HTTPS REST service www-ssl is not reachable at "
+                f"{host}:{port}. Enable www-ssl with a certificate: {error}"
+            ),
         ) from error
     if not certificate:
         raise RegistrationError(
             RegistrationErrorCode.REST_API_DISABLED,
-            f"No TLS certificate was presented by {host}:{port}.",
+            f"RouterOS www-ssl at {host}:{port} did not present a TLS certificate.",
         )
     return hashlib.sha256(certificate).hexdigest()
 

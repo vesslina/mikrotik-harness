@@ -39,12 +39,29 @@ through the connection fields, `r` to refresh, and `q` to quit. The password fie
   calls `check_router_health`, then calls the read-only `get_system_status` tool.
 - A successful connection shows the live tool count and RouterOS status in the UI.
 
-Before connecting, enable RouterOS 7's HTTPS REST service from a trusted management path:
+Before connecting, bootstrap RouterOS 7's HTTPS REST service from a trusted management path.
+REST is served by `www-ssl`; `api-ssl` is a different, binary RouterOS API and must not be moved
+to port 443. The following development setup creates a self-signed server certificate for the
+router's management IP:
 
 ```routeros
-/ip service enable api-ssl
-/ip service set api-ssl port=443
+/certificate add name=mth-https common-name=192.168.56.103 subject-alt-name=IP:192.168.56.103 key-usage=tls-server
+/certificate sign mth-https
+/ip service set www-ssl port=443 certificate=mth-https disabled=no
 ```
+
+Replace the IP with the router's stable management address. If `api-ssl` was previously moved
+to port 443 while following an older revision of this README, restore it before enabling
+`www-ssl`:
+
+```routeros
+/ip service set api-ssl port=8729 disabled=yes
+```
+
+`www-ssl` is normally disabled on an unconfigured router and HTTPS requires a certificate. This
+one-time bootstrap is deliberately not attempted over plaintext HTTP: RouterOS REST uses Basic
+authentication, so doing that would expose the management credentials. A future explicitly
+opted-in SSH bootstrap may automate this step when an already trusted SSH path exists.
 
 Use a dedicated least-privilege RouterOS account with a non-empty password. MNDP values remain
 untrusted self-announcements; only the pinned TLS connection establishes device continuity.
