@@ -1,9 +1,9 @@
 # MikroTik Harness
 
 `mth` is a safety-oriented harness for managing RouterOS through a pinned MikroMCP backend.
-It completes Block A and now includes the first write-capable Block B runbook: MNDP discovery,
-TLS trust-on-first-use, backend registration, model presets, a dynamic read-only MCP agent, and
-an approval-bound WAN PPPoE workflow with verification and rollback.
+It completes Block A and now has a working Block B agent loop: MNDP discovery, TLS
+trust-on-first-use, backend registration, model presets, capability-routed read tools, and four
+approval-bound runbooks with dry-run, verification, persistent history, and rollback.
 
 ## Development setup
 
@@ -81,20 +81,23 @@ visible throughout the session.
 - `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
 - `/models` opens a keyboard-driven picker for every saved preset; `/models <name>` remains a
   direct activation shortcut.
-- `/pppoe` opens the masked WAN PPPoE wizard in READY mode. It builds a live dry-run plan,
-  requires an explicit human approval, applies through MikroMCP, and verifies the resulting
-  interface.
-- A natural-language request to add or configure WAN PPPoE can call the harness-owned
-  `propose_wan_pppoe` handoff. It only opens the same editable masked wizard; it is not a
-  backend write and cannot bypass dry-run, approval, confirmation, verification, or rollback.
-- `/rollback [journal-id]` previews and confirms rollback of a PPPoE change created in the
-  current session; omitting the ID selects the most recent eligible change.
+- `/pppoe`, `/bridge`, `/nat`, and `/services` open schema-driven runbook wizards in READY mode.
+  They cover WAN PPPoE, a LAN bridge with member ports, WAN source-NAT masquerade, and disabling
+  a lockout-safe subset of administrative services.
+- Natural-language change requests can call the matching harness-owned `propose_*` handoff.
+  These calls only open an editable form; the model never receives a backend write tool and
+  cannot bypass dry-run, human approval, MikroMCP confirmation, post-check, or rollback.
+- `/rollback [execution-id|journal-id]` previews and confirms rollback of the complete runbook.
+  History is stored without secrets under `.mth/runbook-history.json`, so rollback still works
+  after restarting `mth`. Omitting the ID selects the most recent eligible execution.
 - `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
-- `Tab` cycles between `PLAN` and `READY`. PLAN exposes no tools. Normal READY chat exposes only
-  read-only, router-bound tools; writes are reachable only through reviewed deterministic
-  runbooks and their approval UI. Fleet-global tools and `run_command` remain excluded.
+- `Tab` cycles between `PLAN` and `READY`. PLAN does not start MikroMCP or expose tools. READY
+  first exposes one local capability selector; the model then receives only the small live
+  read-only domain pack relevant to the request. Writes are reachable only through reviewed
+  deterministic runbooks and their approval UI. Fleet-global tools and `run_command` remain
+  excluded.
 
 An API key entered in `/model` remains in process memory only. Presets under
 `.mth/providers.json` store endpoint/model/capability metadata and optionally an environment
@@ -107,6 +110,10 @@ tokens are protected by default, including values nested inside `structuredConte
 preset may explicitly expose those fields only when its URL resolves syntactically to a
 loopback endpoint (`localhost`, `127.0.0.0/8`, or `::1`); non-loopback presets fail validation.
 This local privacy override is off by default and is visibly announced when active.
+
+Runbook baselines use an independent allowlist projection before they are persisted. For
+example, RouterOS may return a `password` field from `list_pppoe_clients`; that field is never
+copied into the plan or runbook history, even when a loopback model privacy override is active.
 
 Selecting a model triggers a hidden tool-free warm-up probe. Success reports latency; connection,
 authentication, model-name, and malformed-response failures retain distinct error codes.

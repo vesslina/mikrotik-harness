@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -41,14 +41,19 @@ from mth.agent import (
 from mth.core.mcp_client import MikroMcpClient
 from mth.core.registration import MikroMcpConfigStore, RegistrationResult
 from mth.core.runbooks import (
-    PppoeApplyResult,
-    PppoePlan,
-    PppoeRequest,
-    PppoeRollbackPreview,
-    PppoeRollbackResult,
-    PppoeRunbookError,
-    PppoeRunbookExecutor,
-    PppoeSecret,
+    DEFAULT_RUNBOOK_REGISTRY,
+    RunbookApplyResult,
+    RunbookDefinition,
+    RunbookError,
+    RunbookExecutionRecord,
+    RunbookExecutor,
+    RunbookFieldKind,
+    RunbookHistoryStore,
+    RunbookPlan,
+    RunbookRegistry,
+    RunbookRollbackPreview,
+    RunbookRollbackResult,
+    RunbookSubmission,
 )
 
 
@@ -70,25 +75,29 @@ class AgentRunner(Protocol):
 AgentFactory = Callable[[ProviderPreset, str | None], AgentRunner]
 
 
-class PppoeRunner(Protocol):
-    async def plan(self, request: PppoeRequest) -> PppoePlan: ...
+class RunbookRunner(Protocol):
+    definition: RunbookDefinition
+
+    async def plan(self, submission: RunbookSubmission) -> RunbookPlan: ...
 
     async def apply_approved(
         self,
-        plan: PppoePlan,
-        secret: PppoeSecret,
-    ) -> PppoeApplyResult: ...
+        plan: RunbookPlan,
+        secrets: Mapping[str, str] | None = None,
+    ) -> RunbookApplyResult: ...
 
-    async def preview_rollback(self, journal_id: str) -> PppoeRollbackPreview: ...
+    async def preview_rollback(
+        self, journal_ids: Sequence[str]
+    ) -> RunbookRollbackPreview: ...
 
     async def rollback_approved(
         self,
-        journal_id: str,
-        request: PppoeRequest,
-    ) -> PppoeRollbackResult: ...
+        plan: RunbookPlan,
+        journal_ids: Sequence[str],
+    ) -> RunbookRollbackResult: ...
 
 
-PppoeFactory = Callable[[], PppoeRunner]
+RunbookFactory = Callable[[RunbookDefinition], RunbookRunner]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +107,8 @@ class ModelSelection:
 
 
 @dataclass(frozen=True, slots=True)
-class PppoeSelection:
-    request: PppoeRequest
-    secret: PppoeSecret = field(repr=False)
+class RunbookSelection:
+    submission: RunbookSubmission = field(repr=False)
 
 
 class PixelLogo(Static):
@@ -359,119 +367,109 @@ class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
         self.dismiss(None)
 
 
-class PppoeWizardScreen(ModalScreen[PppoeSelection | None]):
+class RunbookWizardScreen(ModalScreen[RunbookSelection | None]):
     CSS = """
-    PppoeWizardScreen { align: center middle; }
-    #pppoe-dialog {
+    RunbookWizardScreen, PppoeWizardScreen { align: center middle; }
+    #runbook-dialog {
         width: 78;
         height: auto;
+        max-height: 38;
         padding: 1 2;
         border: round #ff3b30;
         background: #111315;
     }
-    #pppoe-dialog .pppoe-row { height: 3; }
-    #pppoe-dialog .field-label { width: 22; content-align: left middle; color: #aeb4ba; }
-    #pppoe-dialog Input { width: 1fr; }
-    #pppoe-options { height: 3; }
-    #pppoe-options Checkbox { width: 1fr; }
-    #pppoe-error { height: auto; min-height: 1; color: #ff6b62; }
-    #pppoe-actions { height: auto; margin-top: 1; align-horizontal: right; }
-    #pppoe-actions Button { margin-left: 1; }
+    #runbook-dialog .runbook-row { height: 3; }
+    #runbook-dialog .field-label { width: 24; content-align: left middle; color: #aeb4ba; }
+    #runbook-dialog Input { width: 1fr; }
+    #runbook-error { height: auto; min-height: 1; color: #ff6b62; }
+    #runbook-actions { height: auto; margin-top: 1; align-horizontal: right; }
+    #runbook-actions Button { margin-left: 1; }
     """
 
-    def __init__(self, proposal: RunbookProposal | None = None) -> None:
+    def __init__(
+        self,
+        definition: RunbookDefinition,
+        proposal: RunbookProposal | None = None,
+    ) -> None:
         super().__init__()
+        self.definition = definition
         self._proposal = proposal
 
-    def _proposed_string(self, name: str, default: str = "") -> str:
-        if self._proposal is None:
-            return default
-        value = self._proposal.parameters.get(name)
-        return value if isinstance(value, str) else default
+    @staticmethod
+    def field_id(name: str) -> str:
+        return "runbook-field-" + "".join(
+            character.lower() if character.isalnum() else "-" for character in name
+        )
 
-    def _proposed_bool(self, name: str, default: bool) -> bool:
-        if self._proposal is None:
-            return default
-        value = self._proposal.parameters.get(name)
-        return value if isinstance(value, bool) else default
+    def _initial(self, name: str, default: object) -> object:
+        if self._proposal is not None and name in self._proposal.parameters:
+            return self._proposal.parameters[name]
+        return default
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="pppoe-dialog"):
-            yield Static("WAN PPPoE runbook", classes="dialog-title")
+        with Vertical(id="runbook-dialog"):
+            yield Static(f"{self.definition.title} runbook", classes="dialog-title")
             yield Static(
                 (
                     "The LLM proposed editable values; no change has been made. "
-                    "The password stays in this masked form and is never sent to the LLM."
+                    "Secret fields stay masked and are never sent to the LLM."
                     if self._proposal is not None
-                    else "The password stays in this masked form and is never sent to the LLM."
+                    else "Review every value before building the live dry-run plan."
                 ),
                 markup=False,
             )
-            for label, widget in (
-                (
-                    "Client name",
-                    Input(value=self._proposed_string("name", "pppoe-wan"), id="pppoe-name"),
-                ),
-                (
-                    "Parent interface",
-                    Input(
-                        value=self._proposed_string("interface", "ether1"),
-                        id="pppoe-interface",
-                    ),
-                ),
-                (
-                    "ISP username",
-                    Input(value=self._proposed_string("username"), id="pppoe-username"),
-                ),
-                ("ISP password", Input(password=True, id="pppoe-password")),
-                (
-                    "Service name",
-                    Input(
-                        value=self._proposed_string("serviceName"),
-                        placeholder="optional",
-                        id="pppoe-service",
-                    ),
-                ),
-            ):
-                with Horizontal(classes="pppoe-row"):
-                    yield Label(label, classes="field-label")
-                    yield widget
-            with Horizontal(id="pppoe-options"):
-                yield Checkbox(
-                    "Add default route",
-                    value=self._proposed_bool("addDefaultRoute", True),
-                    id="pppoe-default-route",
-                )
-                yield Checkbox(
-                    "Dial on demand",
-                    value=self._proposed_bool("dialOnDemand", False),
-                    id="pppoe-dial-demand",
-                )
-            yield Static("", id="pppoe-error", markup=False)
-            with Horizontal(id="pppoe-actions"):
-                yield Button("Cancel", id="cancel-pppoe")
-                yield Button("Build dry-run plan", id="plan-pppoe", variant="primary")
+            for spec in self.definition.fields:
+                initial = self._initial(spec.name, spec.default)
+                with Horizontal(classes="runbook-row"):
+                    yield Label(spec.label, classes="field-label")
+                    if spec.kind is RunbookFieldKind.BOOLEAN:
+                        yield Checkbox(
+                            spec.description or spec.label,
+                            value=initial if isinstance(initial, bool) else False,
+                            id=self.field_id(spec.name),
+                        )
+                    else:
+                        if isinstance(initial, (list, tuple)):
+                            value = ", ".join(str(item) for item in initial)
+                        else:
+                            value = initial if isinstance(initial, str) else ""
+                        yield Input(
+                            value=value,
+                            password=spec.kind is RunbookFieldKind.SECRET,
+                            placeholder=spec.placeholder,
+                            id=self.field_id(spec.name),
+                        )
+            yield Static("", id="runbook-error", markup=False)
+            with Horizontal(id="runbook-actions"):
+                yield Button("Cancel", id="cancel-runbook")
+                yield Button("Build dry-run plan", id="plan-runbook", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel-pppoe":
+        if event.button.id == "cancel-runbook":
             self.dismiss(None)
             return
-        if event.button.id != "plan-pppoe":
+        if event.button.id != "plan-runbook":
             return
+        raw: dict[str, object] = {}
+        for spec in self.definition.fields:
+            selector = f"#{self.field_id(spec.name)}"
+            if spec.kind is RunbookFieldKind.BOOLEAN:
+                raw[spec.name] = self.query_one(selector, Checkbox).value
+            else:
+                raw[spec.name] = self.query_one(selector, Input).value
         try:
-            request = PppoeRequest(
-                name=self.query_one("#pppoe-name", Input).value.strip(),
-                interface=self.query_one("#pppoe-interface", Input).value.strip(),
-                username=self.query_one("#pppoe-username", Input).value.strip(),
-                service_name=self.query_one("#pppoe-service", Input).value.strip() or None,
-                add_default_route=self.query_one("#pppoe-default-route", Checkbox).value,
-                dial_on_demand=self.query_one("#pppoe-dial-demand", Checkbox).value,
-            )
-            secret = PppoeSecret(self.query_one("#pppoe-password", Input).value)
+            submission = self.definition.parse_submission(raw)
         except ValueError as error:
-            self.query_one("#pppoe-error", Static).update(str(error))
+            self.query_one("#runbook-error", Static).update(str(error))
             return
-        self.dismiss(PppoeSelection(request, secret))
+        self.dismiss(RunbookSelection(submission))
+
+
+class PppoeWizardScreen(RunbookWizardScreen):
+    """Compatibility name for integrations that opened the original PPPoE modal."""
+
+    def __init__(self, proposal: RunbookProposal | None = None) -> None:
+        super().__init__(DEFAULT_RUNBOOK_REGISTRY.get("wan_pppoe"), proposal)
 
 
 class ApprovalScreen(ModalScreen[bool]):
@@ -515,6 +513,9 @@ class ChatScreen(Screen[None]):
         ("/model", "add or edit a model"),
         ("/models", "choose a saved model"),
         ("/pppoe", "configure WAN PPPoE safely"),
+        ("/bridge", "create a LAN bridge safely"),
+        ("/nat", "configure WAN masquerade safely"),
+        ("/services", "disable unnecessary services safely"),
         ("/rollback", "rollback a runbook journal"),
         ("/log", "session log info"),
         ("/clear", "clear transcript"),
@@ -565,21 +566,28 @@ class ChatScreen(Screen[None]):
         *,
         preset_store: ProviderPresetStore | None = None,
         agent_factory: AgentFactory | None = None,
-        pppoe_factory: PppoeFactory | None = None,
+        runbook_registry: RunbookRegistry = DEFAULT_RUNBOOK_REGISTRY,
+        runbook_factory: RunbookFactory | None = None,
+        history_store: RunbookHistoryStore | None = None,
     ) -> None:
         super().__init__()
         self.profile = profile
         self.registration = registration
         self._preset_store = preset_store or ProviderPresetStore()
         self._agent_factory = agent_factory or self._default_agent_factory
-        self._pppoe_factory = pppoe_factory or self._default_pppoe_factory
+        self._runbooks = runbook_registry
+        self._runbook_factory = runbook_factory or self._default_runbook_factory
+        self._history = history_store or RunbookHistoryStore()
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
         self._mode = AgentMode.PLAN
         self._session_api_keys: dict[str, str] = {}
-        self._pending_pppoe: tuple[PppoeRunner, PppoePlan, PppoeSecret] | None = None
-        self._pppoe_journals: dict[str, PppoeRequest] = {}
-        self._pending_rollback: tuple[PppoeRunner, str, PppoeRequest] | None = None
+        self._pending_runbook: (
+            tuple[RunbookRunner, RunbookPlan, dict[str, str]] | None
+        ) = None
+        self._pending_rollback: (
+            tuple[RunbookRunner, RunbookExecutionRecord] | None
+        ) = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -647,8 +655,8 @@ class ChatScreen(Screen[None]):
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /model  /models [name]  /pppoe  /rollback [journal]  "
-                "/log  /clear  /exit\n"
+                "/help  /info  /model  /models [name]  /pppoe  /bridge  /nat  "
+                "/services  /rollback [execution|journal]  /log  /clear  /exit\n"
                 "Tab cycles PLAN and READY. Writes are available only through approved runbooks."
             )
         elif command == "/info":
@@ -657,14 +665,15 @@ class ChatScreen(Screen[None]):
             self.app.push_screen(ModelWizardScreen(), self._model_selected)
         elif command == "/models":
             self._show_models(argument.strip())
-        elif command == "/pppoe":
+        elif definition := self._runbooks.for_command(command):
             if self._mode is not AgentMode.READY:
                 self._write_system(
-                    "WAN PPPoE is an approved runbook. Press Tab to enter READY first.",
+                    f"{definition.title} is an approved runbook. "
+                    "Press Tab to enter READY first.",
                     error=True,
                 )
             else:
-                self.app.push_screen(PppoeWizardScreen(), self._pppoe_selected)
+                self._open_runbook(definition)
         elif command == "/rollback":
             self._start_rollback(argument.strip())
         elif command == "/log":
@@ -759,12 +768,13 @@ class ChatScreen(Screen[None]):
             provider=provider,
             backend=backend,
             router_id=self.profile.router_id,
+            runbooks=self._runbooks,
         )
 
-    def _default_pppoe_factory(self) -> PppoeRunner:
+    def _default_runbook_factory(self, definition: RunbookDefinition) -> RunbookRunner:
         store = MikroMcpConfigStore()
         backend = MikroMcpClient(environment=store.runtime_environment())
-        return PppoeRunbookExecutor(backend, self.profile.router_id)
+        return RunbookExecutor(backend, self.profile.router_id, definition)
 
     @work(exclusive=True, group="warmup", exit_on_error=False)
     async def _warm_up_model(self) -> None:
@@ -787,122 +797,166 @@ class ChatScreen(Screen[None]):
             else:
                 self._write_system("Model ready.")
 
-    def _pppoe_selected(self, selection: PppoeSelection | None) -> None:
+    def _open_runbook(
+        self,
+        definition: RunbookDefinition,
+        proposal: RunbookProposal | None = None,
+    ) -> None:
+        self.app.push_screen(
+            RunbookWizardScreen(definition, proposal),
+            self._runbook_selected,
+        )
+
+    def _runbook_selected(self, selection: RunbookSelection | None) -> None:
         if selection is None:
             return
-        self._plan_pppoe(selection)
+        self._plan_runbook(selection)
 
-    @work(exclusive=True, group="pppoe", exit_on_error=False)
-    async def _plan_pppoe(self, selection: PppoeSelection) -> None:
+    @work(exclusive=True, group="runbook", exit_on_error=False)
+    async def _plan_runbook(self, selection: RunbookSelection) -> None:
+        definition = self._runbooks.get(selection.submission.runbook_id)
         self.query_one("#chat-input", Input).disabled = True
-        self.query_one("#mode-line", Static).update("◌ Building WAN PPPoE dry-run plan…")
+        self.query_one("#mode-line", Static).update(
+            f"◌ Building {definition.title} dry-run plan…"
+        )
         try:
-            runner = self._pppoe_factory()
-            plan = await runner.plan(selection.request)
-        except PppoeRunbookError as error:
+            runner = self._runbook_factory(definition)
+            plan = await runner.plan(selection.submission)
+        except RunbookError as error:
             self._write_system(f"{error.code}: {error}", error=True)
         except Exception as error:
-            self._write_system(f"PPPoE planning failed: {error}", error=True)
+            self._write_system(f"{definition.title} planning failed: {error}", error=True)
         else:
-            self._pending_pppoe = (runner, plan, selection.secret)
-            self._write_system(f"WAN PPPoE dry-run complete:\n{plan.preview}")
+            self._pending_runbook = (runner, plan, selection.submission.secrets)
+            self._write_system(f"{definition.title} dry-run complete:\n{plan.preview}")
             self.app.push_screen(
                 ApprovalScreen(
                     f"Plan ID: {plan.plan_id}\n\n{plan.summary}\n\n"
-                    "Applying creates a RouterOS interface. A snapshot and audit entry "
-                    "will be written before the change."
+                    "Every step is snapshotted and written to the audit journal before "
+                    "the approved change."
                 ),
-                self._pppoe_approved,
+                self._runbook_approved,
             )
         finally:
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
             self._refresh_mode()
 
-    def _pppoe_approved(self, approved: bool | None) -> None:
-        pending = self._pending_pppoe
+    def _runbook_approved(self, approved: bool | None) -> None:
+        pending = self._pending_runbook
         if pending is None:
             return
         if not approved:
-            self._pending_pppoe = None
-            self._write_system("WAN PPPoE plan cancelled; no changes were made.")
+            self._pending_runbook = None
+            self._write_system("Runbook plan cancelled; no changes were made.")
             return
-        self._apply_pppoe(*pending)
+        self._apply_runbook(*pending)
 
-    @work(exclusive=True, group="pppoe", exit_on_error=False)
-    async def _apply_pppoe(
+    @work(exclusive=True, group="runbook", exit_on_error=False)
+    async def _apply_runbook(
         self,
-        runner: PppoeRunner,
-        plan: PppoePlan,
-        secret: PppoeSecret,
+        runner: RunbookRunner,
+        plan: RunbookPlan,
+        secrets: dict[str, str],
     ) -> None:
         self.query_one("#chat-input", Input).disabled = True
-        self.query_one("#mode-line", Static).update("⏺ Applying approved WAN PPPoE plan…")
+        self.query_one("#mode-line", Static).update(
+            f"⏺ Applying approved {plan.title} plan…"
+        )
         try:
-            result = await runner.apply_approved(plan, secret)
-        except PppoeRunbookError as error:
-            self._write_system(f"{error.code}: {error}", error=True)
+            result = await runner.apply_approved(plan, secrets)
+        except RunbookError as error:
+            suffix = ""
+            if error.journal_ids:
+                try:
+                    self._history.record(
+                        plan,
+                        self.profile.router_id,
+                        error.journal_ids,
+                        status="partial_failure",
+                    )
+                    suffix = (
+                        f"\nPartial apply journals were preserved. Use /rollback {plan.plan_id}."
+                    )
+                except (OSError, ValueError) as history_error:
+                    suffix = f"\nCould not persist partial journals: {history_error}"
+            self._write_system(f"{error.code}: {error}{suffix}", error=True)
         except Exception as error:
-            self._write_system(f"PPPoE apply failed: {error}", error=True)
+            self._write_system(f"{plan.title} apply failed: {error}", error=True)
         else:
             journals = ", ".join(result.journal_ids) or "not returned"
-            for journal_id in result.journal_ids:
-                self._pppoe_journals[journal_id] = plan.request
-            if not result.verified:
-                outcome = "applied; configuration verification failed"
-            elif result.operational is True:
-                outcome = "configuration applied and verified; session active"
+            status = "applied_verified" if result.verified else "applied_unverified"
+            try:
+                self._history.record(
+                    plan,
+                    self.profile.router_id,
+                    result.journal_ids,
+                    status=status,
+                )
+            except (OSError, ValueError) as error:
+                self._write_system(f"Could not persist runbook history: {error}", error=True)
+            outcome = "applied and verified" if result.verified else "applied but unverified"
+            if result.operational is True:
+                outcome += "; operational state active"
             elif result.operational is False:
-                outcome = "configuration applied and verified; session inactive"
-            else:
-                outcome = "configuration applied and verified; session state unknown"
-            message = f"WAN PPPoE {outcome}.\n{result.verification_details}\n"
+                outcome += "; operational state inactive"
+            message = f"{plan.title} {outcome}.\n{result.verification.details}\n"
             message += f"Rollback journal: {journals}\n"
             if result.journal_ids:
-                message += f"Use /rollback {result.journal_ids[0]} to undo this change."
+                message += f"Use /rollback {plan.plan_id} to undo the complete runbook."
             self._write_system(message, error=not result.verified)
         finally:
-            self._pending_pppoe = None
+            self._pending_runbook = None
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_mode()
 
-    def _start_rollback(self, journal_id: str) -> None:
+    def _start_rollback(self, token: str) -> None:
         if self._mode is not AgentMode.READY:
             self._write_system("Press Tab to enter READY before rollback.", error=True)
             return
-        if not journal_id and self._pppoe_journals:
-            journal_id = next(reversed(self._pppoe_journals))
-        request = self._pppoe_journals.get(journal_id)
-        if request is None:
+        try:
+            record = self._history.find(token, self.profile.router_id)
+        except (OSError, ValueError) as error:
+            self._write_system(f"Could not read runbook history: {error}", error=True)
+            return
+        if record is None or record.status == "rolled_back":
             self._write_system(
-                "Unknown PPPoE journal for this session. Use the journal ID shown after apply.",
+                "No active runbook execution matches that execution or journal ID.",
                 error=True,
             )
             return
-        self._preview_rollback(self._pppoe_factory(), journal_id, request)
+        try:
+            definition = self._runbooks.get(record.plan.runbook_id)
+        except KeyError:
+            self._write_system(
+                f"Runbook definition is unavailable: {record.plan.runbook_id}", error=True
+            )
+            return
+        self._preview_rollback(self._runbook_factory(definition), record)
 
-    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    @work(exclusive=True, group="runbook", exit_on_error=False)
     async def _preview_rollback(
         self,
-        runner: PppoeRunner,
-        journal_id: str,
-        request: PppoeRequest,
+        runner: RunbookRunner,
+        record: RunbookExecutionRecord,
     ) -> None:
         self.query_one("#mode-line", Static).update("◌ Building rollback preview…")
         try:
-            preview = await runner.preview_rollback(journal_id)
-        except PppoeRunbookError as error:
+            preview = await runner.preview_rollback(record.journal_ids)
+        except RunbookError as error:
             self._write_system(f"{error.code}: {error}", error=True)
         except Exception as error:
             self._write_system(f"Rollback preview failed: {error}", error=True)
         else:
-            self._pending_rollback = (runner, journal_id, request)
+            self._pending_rollback = (runner, record)
             self.app.push_screen(
                 ApprovalScreen(
-                    f"Rollback journal: {journal_id}\n\n{preview.preview}\n\n"
-                    "Rollback restores the saved PPPoE configuration snapshot.",
+                    f"Runbook: {record.plan.title}\n"
+                    f"Execution: {record.execution_id}\n"
+                    f"Journals: {', '.join(record.journal_ids)}\n\n{preview.preview}\n\n"
+                    f"{runner.definition.rollback_note}",
                     action_label="Rollback this change",
                 ),
                 self._rollback_approved,
@@ -920,22 +974,24 @@ class ChatScreen(Screen[None]):
             return
         self._apply_rollback(*pending)
 
-    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    @work(exclusive=True, group="runbook", exit_on_error=False)
     async def _apply_rollback(
         self,
-        runner: PppoeRunner,
-        journal_id: str,
-        request: PppoeRequest,
+        runner: RunbookRunner,
+        record: RunbookExecutionRecord,
     ) -> None:
         self.query_one("#mode-line", Static).update("⏺ Applying approved rollback…")
         try:
-            result = await runner.rollback_approved(journal_id, request)
-        except PppoeRunbookError as error:
+            result = await runner.rollback_approved(record.plan, record.journal_ids)
+        except RunbookError as error:
             self._write_system(f"{error.code}: {error}", error=True)
         except Exception as error:
             self._write_system(f"Rollback failed: {error}", error=True)
         else:
-            self._pppoe_journals.pop(journal_id, None)
+            try:
+                self._history.mark_rolled_back(record.execution_id)
+            except (OSError, ValueError) as error:
+                self._write_system(f"Could not update runbook history: {error}", error=True)
             self._write_system(f"Rollback applied and verified.\n{result.verification_details}")
         finally:
             self._pending_rollback = None
@@ -968,7 +1024,14 @@ class ChatScreen(Screen[None]):
             for event in events:
                 self._render_event(event)
             if proposal is not None:
-                self.app.push_screen(PppoeWizardScreen(proposal), self._pppoe_selected)
+                try:
+                    definition = self._runbooks.get(proposal.runbook)
+                except KeyError:
+                    self._write_system(
+                        f"Unknown runbook proposal: {proposal.runbook}", error=True
+                    )
+                else:
+                    self._open_runbook(definition, proposal)
         finally:
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
@@ -997,9 +1060,13 @@ class ChatScreen(Screen[None]):
             style = "#ff6b62" if event.is_error else "#7fd88f"
             log.write(Text(f"    ↳ {status}", style=style))
         elif isinstance(event, RunbookProposal):
+            try:
+                title = self._runbooks.get(event.runbook).title
+            except KeyError:
+                title = event.runbook
             log.write(
                 Text(
-                    "  ↳ WAN PPPoE proposal ready · opening editable approval form",
+                    f"  ↳ {title} proposal ready · opening editable approval form",
                     style="#ffb454",
                 )
             )

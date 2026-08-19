@@ -1,5 +1,33 @@
 """Deterministic, approval-bound RouterOS runbooks."""
 
+from mth.core.runbooks.base import (
+    RunbookApplyResult,
+    RunbookBackend,
+    RunbookDefinition,
+    RunbookError,
+    RunbookExecutor,
+    RunbookField,
+    RunbookFieldKind,
+    RunbookPlan,
+    RunbookRollbackPreview,
+    RunbookRollbackResult,
+    RunbookStep,
+    RunbookSubmission,
+    RunbookVerification,
+)
+from mth.core.runbooks.catalog import (
+    DEFAULT_RUNBOOK_REGISTRY,
+    AdminServicesDefinition,
+    LanBridgeDefinition,
+    RunbookRegistry,
+    WanNatDefinition,
+    WanPppoeDefinition,
+)
+from mth.core.runbooks.history import (
+    RunbookExecutionRecord,
+    RunbookHistoryPaths,
+    RunbookHistoryStore,
+)
 from mth.core.runbooks.pppoe import (
     PppoeApplyResult,
     PppoePlan,
@@ -12,6 +40,9 @@ from mth.core.runbooks.pppoe import (
 )
 
 __all__ = [
+    "DEFAULT_RUNBOOK_REGISTRY",
+    "AdminServicesDefinition",
+    "LanBridgeDefinition",
     "PppoeApplyResult",
     "PppoePlan",
     "PppoeRequest",
@@ -20,4 +51,23 @@ __all__ = [
     "PppoeRunbookError",
     "PppoeRunbookExecutor",
     "PppoeSecret",
+    "RunbookApplyResult",
+    "RunbookBackend",
+    "RunbookDefinition",
+    "RunbookError",
+    "RunbookExecutionRecord",
+    "RunbookExecutor",
+    "RunbookField",
+    "RunbookFieldKind",
+    "RunbookHistoryPaths",
+    "RunbookHistoryStore",
+    "RunbookPlan",
+    "RunbookRegistry",
+    "RunbookRollbackPreview",
+    "RunbookRollbackResult",
+    "RunbookStep",
+    "RunbookSubmission",
+    "RunbookVerification",
+    "WanNatDefinition",
+    "WanPppoeDefinition",
 ]

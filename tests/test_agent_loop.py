@@ -73,6 +73,17 @@ class _Provider:
         self.calls += 1
         if self.calls == 1:
             return ProviderReply(
+                "Load interface tools.",
+                (
+                    ProviderToolCall(
+                        "select-1",
+                        "select_router_capabilities",
+                        {"domains": ["interfaces"]},
+                    ),
+                ),
+            )
+        if self.calls == 2:
+            return ProviderReply(
                 "I will inspect interfaces.",
                 (
                     ProviderToolCall(
@@ -98,8 +109,13 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
 
         events = await loop.run("Show interfaces", AgentMode.READY)
 
-        expected_tools = ("list_interfaces", "propose_wan_pppoe")
-        assert provider.tool_names == [expected_tools, expected_tools]
+        selector = ("select_router_capabilities",)
+        selected = (
+            "select_router_capabilities",
+            "list_interfaces",
+            "propose_lan_bridge",
+        )
+        assert provider.tool_names == [selector, selected, selected]
         assert backend.arguments == {"routerId": "mikrotik-afe23e"}
         assert backend.catalog_calls == 1
         assert any(isinstance(event, PlannedAction) for event in events)
@@ -129,6 +145,7 @@ def test_plan_mode_exposes_no_tools() -> None:
 
         assert isinstance(events[0], AgentMessage)
         assert backend.arguments is None
+        assert backend.catalog_calls == 0
 
     asyncio.run(scenario())
 
@@ -331,7 +348,11 @@ def test_tool_secrets_are_redacted_before_events_and_model_context() -> None:
         assert "12345" not in serialized
         assert "secret-key" not in serialized
         assert "[REDACTED]" in serialized
-        result = next(event for event in events if isinstance(event, ToolResult))
+        result = next(
+            event
+            for event in events
+            if isinstance(event, ToolResult) and event.tool_name == "list_interfaces"
+        )
         assert result.structured_content is not None
         assert result.structured_content["clients"][0]["password"] == "[REDACTED]"
 
@@ -371,7 +392,25 @@ def test_loopback_opt_in_can_expose_sensitive_tool_data() -> None:
 def test_pppoe_intent_becomes_harness_proposal_without_backend_write() -> None:
     async def scenario() -> None:
         class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
             async def complete(self, messages, tools=()) -> ProviderReply:
+                self.calls += 1
+                if self.calls == 1:
+                    assert {tool.name for tool in tools} == {
+                        "select_router_capabilities"
+                    }
+                    return ProviderReply(
+                        "",
+                        (
+                            ProviderToolCall(
+                                "select-1",
+                                "select_router_capabilities",
+                                {"domains": ["wan_vpn"]},
+                            ),
+                        ),
+                    )
                 assert "propose_wan_pppoe" in {tool.name for tool in tools}
                 return ProviderReply(
                     "",

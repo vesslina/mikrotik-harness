@@ -1,149 +1,139 @@
 # Block B architecture decision
 
-## Scope of the first slice
+## Current state
 
-The first Block B slice deliberately stops before an LLM provider is introduced. It proves the
-execution boundary that every later agent operation depends on:
+Block A is complete and the first major Block B pass is operational. A connected model can read
+live RouterOS state through a bounded capability pack, explain the result, and hand a supported
+change request to one of four deterministic runbooks. The model never executes a write itself.
 
-1. spawn the pinned MikroMCP child process over stdio;
-2. initialize an official Python MCP SDK session;
-3. fetch the live `tools/list` catalog rather than hardcoding a count or schema;
-4. call `check_router_health` and the read-only `get_system_status` tool;
-5. normalize results into UI-independent Python contracts.
+Implemented runbooks:
 
-This slice is also the final part of Block A because registration is not complete until the
-backend itself reports the router healthy.
+| Command | Runbook | Reviewed write tools |
+| --- | --- | --- |
+| `/pppoe` | WAN PPPoE client | `manage_pppoe_client` |
+| `/bridge` | LAN bridge and member ports | `manage_bridge`, `manage_bridge_port` |
+| `/nat` | WAN source-NAT masquerade | `manage_firewall_rule` |
+| `/services` | Disable a lockout-safe service subset | `manage_ip_service` |
+
+The remaining catalog from the project context is intentionally not represented as direct model
+tools. New change capability is added by registering another reviewed `RunbookDefinition`, not by
+relaxing the agent boundary.
 
 ## Dependency and runtime
 
 - Backend: `external/mikromcp`, git submodule pinned at tag `v1.9.0` (commit
   `955cd99e9125b76d9ccc3f3c2f009a33de479a52`).
-- Client: official Python `mcp` package, stdio transport.
-- Configuration: local `.mth/mikromcp/`; never committed.
-- Runtime catalog observed during development: 122 tools. This number is diagnostic only and
-  is never encoded in the application.
-
-The upstream documentation and generated tool page can temporarily disagree about the tool
-count. The initialized server's `tools/list` response is therefore the runtime source of truth.
-
-## Component boundary
+- Client: official Python `mcp` package over stdio.
+- Private configuration and execution history: `.mth/`; never committed.
+- The initialized server's `tools/list` response is the runtime source of truth. The 122-tool
+  count observed during development is diagnostic and is never hardcoded as a contract.
 
 ```text
-Textual UI
-  -> RegistrationService
-       -> TLS certificate capture (TOFU presentation only)
-       -> MikroMcpConfigStore
-       -> MikroMcpClient
-            -> Python MCP SDK
-                 -> pinned MikroMCP stdio child
-                      -> RouterOS REST API over HTTPS
+Textual chat
+  -> provider-neutral agent loop
+       -> local capability selector
+       -> filtered live MikroMCP read tools
+       -> local propose_* handoff
+            -> schema-driven runbook wizard
+            -> RunbookExecutor
+                 -> capture projected baseline
+                 -> plan_changes (dry-run)
+                 -> human approval
+                 -> apply_plan confirmation challenge
+                 -> apply + post-check
+                 -> secret-free persistent history
+                 -> previewed, approved, verified rollback
 ```
 
-`core` never imports Textual. The UI never writes MikroMCP files or starts Node.js itself. The
-TLS capture code does not implement a second pin validator: it captures and presents the first
-certificate. MikroMCP's own connector enforces the stored pin on every real request.
+`core` never imports Textual. The UI creates definitions and executors through protocols and
+factories; a runbook definition owns its parameter schema, deterministic step builder, baseline,
+apply verification, rollback verification, capability domains, and rollback caveat.
 
-RouterOS exposes this REST endpoint through `www-ssl` on HTTPS, not through the binary
-`api-ssl` service. A factory/default device therefore needs a one-time trusted bootstrap that
-enables `www-ssl` with a certificate. The harness does not fall back to plaintext `www`, because
-REST authentication uses HTTP Basic credentials.
+## Agent tool routing
 
-## Safety findings applied
+PLAN mode is genuinely tool-free and does not start MikroMCP. READY initially exposes only
+`select_router_capabilities`. The model selects up to three domains:
 
-Two upstream defaults are unsafe for this harness if left implicit:
+- overview;
+- interfaces;
+- addressing and services;
+- firewall and routing;
+- WAN and VPN;
+- system;
+- containers;
+- diagnostics.
 
-1. stdio without `MIKROMCP_STDIO_IDENTITY` becomes the built-in `superadmin` identity;
-2. destructive confirmation is checked only when `MIKROMCP_CONFIRMATION_SECRET` is set.
+The harness then filters the live catalog to router-bound tools whose names are an approved read
+shape (`list_*`, `get_*`, `check_router_health`, `ping`, or `traceroute`) and whose annotations
+say `readOnlyHint=true` and not destructive. The selected domain receives only the relevant
+subset plus matching local `propose_*` tools. A live development check covered all 60 eligible
+read tools in the 122-tool catalog; individual packs contained 7–18 tools.
 
-The config store therefore always creates a named `operator`, sets
-`MIKROMCP_STDIO_IDENTITY`, and generates a persistent confirmation secret. In the current
-read-only slice its tool patterns are restricted to list/get/health and selected diagnostics.
-Write tools are not yet authorized.
+Every real call is rebound to the connected `routerId`. Fleet-global tools, management tools,
+`apply_plan`, and `run_command` never reach the model. Device output is treated as untrusted data
+and recursively redacted before it enters either model context or normalized UI events.
 
-Secrets are written only to `.mth/mikromcp/.env`, passed directly in the child environment,
-never included in `routers.yaml`, UI status text, logs, or MCP tool arguments generated by an
-LLM.
+## Universal runbook lifecycle
 
-## Implemented Block B contracts
+`RunbookExecutor` enforces one lifecycle for every definition:
 
-The provider-neutral foundation now includes:
+1. parse and validate typed public fields while separating secret fields;
+2. build at most ten deterministic steps using only the definition's declared write tools;
+3. capture a pre-change baseline and fail closed if it cannot be read;
+4. send the secret-free steps to `plan_changes` and reject any nested `would_fail` result;
+5. show the immutable plan to the operator;
+6. rebuild apply arguments and allow differences only for declared secret backend parameters;
+7. require MikroMCP's `CONFIRMATION_REQUIRED` challenge and single-use token;
+8. require one rollback journal per successfully applied step;
+9. run a definition-specific post-check in the same backend session;
+10. persist the plan and journals even when apply is partial or the post-check is inconclusive;
+11. roll journals back in reverse order after a separate preview and approval, then verify the
+    result against the saved baseline.
 
-- an explicit per-preset/model capability matrix matching Section 3.9;
-- early rejection of models without typed OpenAI-format tool calls;
-- presets that store only an API-key environment-variable name, never the key value;
-- normalized typed events for agent messages, plans, tool calls/results, approvals,
-  verification, and final summaries.
+The history file accepts either a runbook execution ID or any of its journal IDs. This makes a
+multi-step bridge rollback atomic from the operator's point of view and restart-safe from the
+harness's point of view.
 
-## Implemented agent chat slice
+## Secrets and untrusted state
 
-The first end-to-end agent path is now operational:
+PPPoE passwords are collected in a masked field and injected only while assembling the approved
+apply call. They are absent from proposal schemas, dry-run steps, transcript text, plans, and
+history. This boundary is independent from the optional loopback-model setting that allows raw
+sensitive read results to enter local model context.
 
-1. successful Block A registration opens a dedicated Textual chat screen;
-2. `/model` creates a Local, OpenRouter, or custom OpenAI-compatible preset, while `/models`
-   selects any saved preset from a keyboard-driven modal;
-3. the provider key is held in memory or resolved from a named environment variable;
-4. PLAN mode sends no tools, while READY dynamically fetches the MCP catalog;
-5. the catalog is reduced to router-bound tools with `readOnlyHint=true`,
-   `destructiveHint=false`, and an allowed read name (`list_*`, `get_*`,
-   `check_router_health`, `ping`, or `traceroute`) before it reaches the model;
-6. every tool call is rebound to the connected `routerId`, executed through the shared
-   `MikroMcpClient`, normalized into agent events, and rendered in the transcript;
-7. LM Studio `reasoning_content` is normalized into a compact reasoning-status event, while only
-   a clearly labelled misplaced final answer is recovered as visible assistant text.
-8. model selection starts a hidden, tool-free warm-up and reports typed provider failures rather
-   than a generic connection error.
-9. tool results cross a recursive redaction boundary before entering model context or normalized
-   UI events; raw sensitive fields require an explicit loopback-only per-preset override.
+RouterOS can include a `password` field in `list_pppoe_clients`. Baseline capture therefore does
+not persist arbitrary records: every runbook projects only the small allowlist of fields required
+for later verification. Arbitrary comments, scripts, credentials, and other device-controlled
+fields cannot silently become durable runbook state.
 
-Normal READY chat remains read-only. The agent-side catalog filter excludes management tools,
-`apply_plan`, and `run_command`; Router output is explicitly identified as untrusted data in the
-system prompt. Write capability is exposed only through reviewed deterministic runbooks.
+The stdio process always uses a named `mth-operator` identity and a persistent confirmation
+secret. Its RBAC allowlist is migrated from the registered runbook catalog and contains generic
+plan/apply/rollback meta-tools plus only the five reviewed write tools listed above. Nested
+`apply_plan` dispatch is checked again by the harness against the immutable definition.
 
-## Implemented WAN PPPoE runbook
+## Runbook-specific limits
 
-The first state-changing vertical slice is available through `/pppoe` in READY mode:
+- PPPoE configuration verification and operational state are separate. A matching but disabled
+  or disconnected client is verified configuration, not an active WAN session.
+- A bridge plan supports at most nine member ports because MikroMCP plans support ten steps and
+  bridge creation consumes one. Moving a management interface can interrupt connectivity and is
+  called out before approval.
+- NAT is source masquerade only. The pinned backend's typed firewall tool does not expose the
+  destination-NAT translation fields required for a safe port-forward runbook.
+- Firewall rollback restores presence and fields but cannot guarantee original rule order.
+- The services runbook can disable only `api`, `api-ssl`, `telnet`, `www`, and `ftp`. It refuses
+  `www-ssl`, `ssh`, and `winbox` to protect the harness and operator management paths.
 
-1. a masked Textual wizard gathers the parent interface, ISP username, PPPoE password, service
-   name, default-route choice, and dial-on-demand choice;
-2. the password is held separately from the immutable plan request and is omitted from
-   `plan_changes`, the LLM context, the transcript, and the human-readable plan;
-3. `plan_changes` previews one hardcoded `manage_pppoe_client` step against live state;
-4. a human must approve the exact immutable plan in a modal before apply begins;
-5. the harness requests MikroMCP's `CONFIRMATION_REQUIRED` challenge and fails closed if the
-   configured operator identity does not produce one;
-6. token issuance, `apply_plan`, and `list_pppoe_clients` verification run in one persistent MCP
-   child session so MikroMCP's process-local single-use token protection remains effective;
-7. the returned per-step journal ID enables `/rollback`, which has its own preview, human
-   approval, confirmation challenge, execution, and absence post-check.
+## Next Block B passes
 
-If apply succeeds but the mandatory post-check fails, the outcome is reported as unverified and
-the journal ID is deliberately retained so the operator can still choose rollback.
+1. Add the remaining reviewed runbooks from the project catalog in coherent groups: DHCP/DNS,
+   firewall baseline, Wi-Fi, WireGuard, backup/export, and diagnostics.
+2. Add CHR golden tests for successful apply and rollback. PPPoE's active-session case needs a
+   local PPPoE server; bridge/NAT/services should use isolated temporary objects.
+3. Add optional provider streaming without changing normalized events or safety boundaries.
+4. Add deterministic runbook-selected RAG and curated golden examples after the operational
+   catalog is complete.
 
-Configuration verification and operational state are reported separately. A PPPoE interface can
-match the approved name/interface/user while still being disabled or not running; this is shown
-as a verified configuration with an inactive session rather than a fully active connection.
-
-READY also exposes one harness-owned virtual tool, `propose_wan_pppoe`. It lets an LLM translate
-a natural-language change intent into editable non-secret wizard defaults. The call never reaches
-MikroMCP, ignores undeclared fields such as passwords, and stops the agent loop so the existing
-deterministic runbook takes over.
-
-The operator RBAC allowlist now includes only the generic change-management meta-tools and the
-reviewed PPPoE write tool in addition to the previous read operations. Although MikroMCP's
-`apply_plan` can dispatch nested tools internally, no model receives that tool and the harness
-constructs its step list deterministically.
-
-## Next Block B slices
-
-1. Exercise WAN PPPoE against CHR with a local PPPoE server and record the first active-session
-   golden path,
-   including confirmation-gate and rollback checks.
-2. Add optional provider streaming without changing normalized event contracts.
-3. Implement the second and third reviewed runbooks, expanding the operator allowlist only for
-   their exact write tools.
-4. Add deterministic runbook-selected RAG and curated golden-path examples, then richer opt-in
-   reasoning summaries and other deferred UI polish.
-
-No model receives raw RouterOS commands, device output as instructions, or a direct path to
-`apply_plan`. Secret tool fields are redacted unless the operator explicitly enables the
-loopback-only local-model privacy override.
+RAG remains deliberately deferred: typed live state and deterministic runbooks deliver more
+operational value now, while documentation retrieval can be added later without reopening the
+write boundary.

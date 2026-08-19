@@ -13,6 +13,7 @@ import yaml
 
 from mth.core.mcp_client.runtime import project_root
 from mth.core.registration.models import PendingRegistration
+from mth.core.runbooks import DEFAULT_RUNBOOK_REGISTRY
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +52,7 @@ class MikroMcpConfigStore:
         "plan_changes",
         "apply_plan",
         "rollback_change",
-        "manage_pppoe_client",
+        *DEFAULT_RUNBOOK_REGISTRY.write_tools,
     )
 
     def __init__(self, paths: ConfigPaths | None = None) -> None:

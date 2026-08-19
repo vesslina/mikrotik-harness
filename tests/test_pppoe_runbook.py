@@ -24,6 +24,7 @@ class _Backend:
         self.bypass_confirmation = bypass_confirmation
         self.verification_error = verification_error
         self.rolled_back = False
+        self.pppoe_reads = 0
 
     @asynccontextmanager
     async def open_session(self):
@@ -83,7 +84,8 @@ class _Backend:
             self.rolled_back = True
             return McpToolResult(("Rolled back journal-1",), {"action": "rolled_back"}, False)
         if name == "list_pppoe_clients":
-            if self.verification_error:
+            self.pppoe_reads += 1
+            if self.verification_error and self.pppoe_reads > 1:
                 return McpToolResult(
                     ("Router timeout",),
                     {"code": "ROUTER_TIMEOUT", "message": "Router timeout"},
@@ -127,7 +129,9 @@ def test_pppoe_plan_apply_and_verify_keep_secret_out_of_plan() -> None:
         assert result.operational is False
         assert "not currently running" in result.verification_details
         assert result.journal_ids == ("journal-1",)
-        assert backend.open_count == 1
+        # Planning captures a pre-change baseline in its own MCP session; apply and
+        # post-check then share a second session.
+        assert backend.open_count == 2
         assert [name for name, _ in backend.calls[-3:]] == [
             "apply_plan",
             "apply_plan",

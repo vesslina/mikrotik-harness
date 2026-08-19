@@ -19,10 +19,15 @@ from mth.agent import (
 )
 from mth.core.registration import RegistrationResult
 from mth.core.runbooks import (
-    PppoeApplyResult,
-    PppoePlan,
-    PppoeRollbackPreview,
-    PppoeRollbackResult,
+    RunbookApplyResult,
+    RunbookHistoryPaths,
+    RunbookHistoryStore,
+    RunbookPlan,
+    RunbookRollbackPreview,
+    RunbookRollbackResult,
+    RunbookStep,
+    RunbookVerification,
+    WanPppoeDefinition,
 )
 from mth.ui.textual.chat import (
     ApprovalScreen,
@@ -31,7 +36,7 @@ from mth.ui.textual.chat import (
     ModelPickerScreen,
     ModelWizardScreen,
     PixelLogo,
-    PppoeWizardScreen,
+    RunbookWizardScreen,
 )
 
 
@@ -87,31 +92,40 @@ class _Runner:
         )
 
 
-class _PppoeRunner:
+class _RunbookRunner:
     def __init__(self) -> None:
-        self.request = None
+        self.definition = WanPppoeDefinition()
+        self.submission = None
         self.applied_password = None
-        self.rollback_journal = None
+        self.rollback_journals = None
 
-    async def plan(self, request):
-        self.request = request
-        return PppoePlan("plan-1", request, "Dry run: would create pppoe-wan")
+    async def plan(self, submission):
+        self.submission = submission
+        return RunbookPlan(
+            plan_id="plan-1",
+            runbook_id="wan_pppoe",
+            title="WAN PPPoE",
+            values=submission.values,
+            baseline={"record": None},
+            steps=(RunbookStep("manage_pppoe_client", {"action": "add"}),),
+            preview="Dry run: would create pppoe-wan",
+            summary="Create PPPoE client",
+        )
 
-    async def apply_approved(self, plan, secret):
-        self.applied_password = secret.password
-        return PppoeApplyResult(
+    async def apply_approved(self, plan, secrets=None):
+        self.applied_password = secrets["password"]
+        return RunbookApplyResult(
             journal_ids=("journal-1",),
-            verified=True,
-            verification_details="PPPoE client exists.",
+            verification=RunbookVerification(True, "PPPoE client exists."),
             backend_summary="Applied.",
         )
 
-    async def preview_rollback(self, journal_id):
-        return PppoeRollbackPreview(journal_id, "Would remove pppoe-wan")
+    async def preview_rollback(self, journal_ids):
+        return RunbookRollbackPreview(tuple(journal_ids), "Would remove pppoe-wan")
 
-    async def rollback_approved(self, journal_id, request):
-        self.rollback_journal = journal_id
-        return PppoeRollbackResult(True, "PPPoE client is absent.", "Rolled back.")
+    async def rollback_approved(self, plan, journal_ids):
+        self.rollback_journals = tuple(journal_ids)
+        return RunbookRollbackResult(True, "PPPoE client is absent.", "Rolled back.")
 
 
 class _ChatApp(App[None]):
@@ -278,13 +292,16 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
 
 def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_path) -> None:
     async def scenario() -> None:
-        pppoe = _PppoeRunner()
+        runner = _RunbookRunner()
         screen = ChatScreen(
             _profile(),
             _registration(),
             preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
             agent_factory=lambda _preset, _key: _Runner(),
-            pppoe_factory=lambda: pppoe,
+            runbook_factory=lambda _definition: runner,
+            history_store=RunbookHistoryStore(
+                RunbookHistoryPaths(file=tmp_path / "runbooks.json")
+            ),
         )
         app = _ChatApp(screen)
 
@@ -300,11 +317,11 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
             prompt.value = "/pppoe"
             await pilot.press("enter")
             await pilot.pause()
-            assert isinstance(app.screen, PppoeWizardScreen)
+            assert isinstance(app.screen, RunbookWizardScreen)
             wizard = app.screen
-            wizard.query_one("#pppoe-username", Input).value = "isp-user"
-            wizard.query_one("#pppoe-password", Input).value = "isp-secret"
-            await pilot.click("#plan-pppoe")
+            wizard.query_one("#runbook-field-username", Input).value = "isp-user"
+            wizard.query_one("#runbook-field-password", Input).value = "isp-secret"
+            await pilot.click("#plan-runbook")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -317,7 +334,7 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
             await pilot.pause()
 
             assert isinstance(app.screen, ChatScreen)
-            assert pppoe.applied_password == "isp-secret"
+            assert runner.applied_password == "isp-secret"
             prompt.value = "/rollback journal-1"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
@@ -328,7 +345,7 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
             await pilot.pause()
 
             assert isinstance(app.screen, ChatScreen)
-            assert pppoe.rollback_journal == "journal-1"
+            assert runner.rollback_journals == ("journal-1",)
 
     asyncio.run(scenario())
 
@@ -372,11 +389,40 @@ def test_agent_pppoe_proposal_opens_prefilled_masked_runbook(tmp_path) -> None:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert isinstance(app.screen, PppoeWizardScreen)
+            assert isinstance(app.screen, RunbookWizardScreen)
             wizard = app.screen
-            assert wizard.query_one("#pppoe-name", Input).value == "isp-uplink"
-            assert wizard.query_one("#pppoe-interface", Input).value == "ether3"
-            assert wizard.query_one("#pppoe-username", Input).value == "subscriber"
-            assert wizard.query_one("#pppoe-password", Input).value == ""
+            assert wizard.query_one("#runbook-field-name", Input).value == "isp-uplink"
+            assert wizard.query_one("#runbook-field-interface", Input).value == "ether3"
+            assert wizard.query_one("#runbook-field-username", Input).value == "subscriber"
+            assert wizard.query_one("#runbook-field-password", Input).value == ""
+
+    asyncio.run(scenario())
+
+
+def test_bridge_command_uses_the_generic_schema_driven_wizard(tmp_path) -> None:
+    async def scenario() -> None:
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(
+                PresetPaths(file=tmp_path / "providers.json")
+            ),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 45)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/bridge"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RunbookWizardScreen)
+            wizard = app.screen
+            assert wizard.definition.id == "lan_bridge"
+            assert wizard.query_one("#runbook-field-name", Input).value == "bridge-lan"
+            assert wizard.query_one("#runbook-field-interfaces", Input).password is False
+            assert wizard.query_one("#runbook-field-comment", Input).value == "Managed by mth"
 
     asyncio.run(scenario())
