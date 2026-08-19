@@ -41,14 +41,20 @@ through the connection fields, `r` to refresh, and `q` to quit. The password fie
 
 Before connecting, bootstrap RouterOS 7's HTTPS REST service from a trusted management path.
 REST is served by `www-ssl`; `api-ssl` is a different, binary RouterOS API and must not be moved
-to port 443. The following development setup creates a self-signed server certificate for the
-router's management IP:
+to port 443. The following development setup creates a local certificate authority, signs a
+server certificate for the router's management IP, and assigns it to `www-ssl`:
 
 ```routeros
+/certificate add name=mth-ca common-name=mth-ca key-usage=key-cert-sign,crl-sign
+/certificate sign mth-ca
 /certificate add name=mth-https common-name=192.168.56.103 subject-alt-name=IP:192.168.56.103 key-usage=tls-server
-/certificate sign mth-https
+/certificate sign mth-https ca=mth-ca
 /ip service set www-ssl port=443 certificate=mth-https disabled=no
 ```
+
+The explicit `ca=mth-ca` is required because `mth-https` has server-only key usage and cannot
+self-sign. If the server template already exists after an earlier failed signing attempt, keep
+it, create/sign `mth-ca`, and then run only `/certificate sign mth-https ca=mth-ca`.
 
 Replace the IP with the router's stable management address. If `api-ssl` was previously moved
 to port 443 while following an older revision of this README, restore it before enabling
