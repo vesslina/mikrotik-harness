@@ -20,18 +20,38 @@ from mth.agent.events import (
     ToolResult,
     VerificationResult,
 )
+from mth.agent.loop import AgentMode, ReadOnlyAgentLoop
+from mth.agent.presets import PresetPaths, ProviderPresetStore
+from mth.agent.providers import (
+    ChatProvider,
+    OpenAICompatibleClient,
+    ProviderError,
+    ProviderErrorCode,
+    ProviderReply,
+    ProviderToolCall,
+)
 
 __all__ = [
     "AgentEvent",
     "AgentMessage",
+    "AgentMode",
     "ApprovalRequest",
     "CapabilityMismatchError",
     "FinalOutcome",
     "FinalSummary",
     "ModelCapabilities",
+    "OpenAICompatibleClient",
     "PlannedAction",
+    "PresetPaths",
     "ProviderKind",
+    "ProviderError",
+    "ProviderErrorCode",
     "ProviderPreset",
+    "ProviderPresetStore",
+    "ProviderReply",
+    "ProviderToolCall",
+    "ChatProvider",
+    "ReadOnlyAgentLoop",
     "ReasoningControl",
     "RiskLevel",
     "ToolCall",

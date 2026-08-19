@@ -1,9 +1,9 @@
 # MikroTik Harness
 
 `mth` is a safety-oriented harness for managing RouterOS through a pinned MikroMCP backend.
-It currently completes Block A and the first read-only foundation of Block B: MNDP discovery,
-TLS trust-on-first-use, backend registration, health verification, dynamic tool discovery, and
-system status.
+It completes Block A and now includes a working read-only Block B chat slice: MNDP discovery,
+TLS trust-on-first-use, backend registration, health verification, model presets, an
+OpenAI-compatible provider client, and a dynamic MCP tool loop.
 
 ## Development setup
 
@@ -37,7 +37,7 @@ through the connection fields, `r` to refresh, and `q` to quit. The password fie
   `identities.yaml`, and `.env` formats. The whole `.mth/` directory is ignored by Git.
 - The stdio backend runs as a scoped `operator` identity. It dynamically fetches `tools/list`,
   calls `check_router_health`, then calls the read-only `get_system_status` tool.
-- A successful connection shows the live tool count and RouterOS status in the UI.
+- A successful connection opens the chat screen with the live device profile and MCP tool count.
 
 Before connecting, bootstrap RouterOS 7's HTTPS REST service from a trusted management path.
 REST is served by `www-ssl`; `api-ssl` is a different, binary RouterOS API and must not be moved
@@ -71,6 +71,27 @@ opted-in SSH bootstrap may automate this step when an already trusted SSH path e
 
 Use a dedicated least-privilege RouterOS account with a non-empty password. MNDP values remain
 untrusted self-announcements; only the pinned TLS connection establishes device continuity.
+
+## Agent chat
+
+After a successful connection, `mth` opens a keyboard-first chat screen. Its pixel header keeps
+the connected device, RouterOS version, selected model, harness version, and live MCP tool count
+visible throughout the session.
+
+- `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
+- `/models [name]` lists presets or activates one by name.
+- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the initial command surface.
+- `Tab` cycles between `PLAN` and `READY`. PLAN exposes no tools; READY exposes read-only tools
+  bound to the connected router only. Write tools, fleet-global tools, `apply_plan`, and
+  `run_command` are excluded from this slice.
+
+An API key entered in `/model` remains in process memory only. Presets under
+`.mth/providers.json` store endpoint/model/capability metadata and optionally an environment
+variable name, never the key value itself. The VS Code setting `python.terminal.useEnvFile` is
+not required by `mth`; RouterOS credentials are passed directly to the pinned child process.
+
+The model never chooses a router ID. Every MCP call is rebound to the currently connected
+router, and RouterOS/device output is framed as untrusted data rather than instructions.
 
 ## Headless discovery
 

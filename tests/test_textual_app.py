@@ -5,6 +5,7 @@ from textual.widgets import DataTable, Input, Static
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
 from mth.core.registration import PendingRegistration, RegistrationResult
 from mth.ui.textual.app import DiscoveryApp, FingerprintScreen
+from mth.ui.textual.chat import ChatScreen
 
 
 def _device() -> DeviceInfo:
@@ -143,6 +144,7 @@ def test_first_connection_requires_fingerprint_confirmation() -> None:
             await app.workers.wait_for_complete()
 
             assert registrar.registered is True
+            assert isinstance(app.screen, ChatScreen)
             assert "Connected to MikroTik" in str(app.query_one("#status", Static).content)
             assert "Live MCP tools: 122" in str(
                 app.query_one("#backend-status", Static).content

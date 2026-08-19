@@ -74,16 +74,33 @@ The provider-neutral foundation now includes:
 - normalized typed events for agent messages, plans, tool calls/results, approvals,
   verification, and final summaries.
 
+## Implemented read-only chat slice
+
+The first end-to-end agent path is now operational:
+
+1. successful Block A registration opens a dedicated Textual chat screen;
+2. `/model` creates a Local, OpenRouter, or custom OpenAI-compatible preset;
+3. the provider key is held in memory or resolved from a named environment variable;
+4. PLAN mode sends no tools, while READY dynamically fetches the MCP catalog;
+5. the catalog is reduced to router-bound tools with `readOnlyHint=true`,
+   `destructiveHint=false`, and an allowed read name (`list_*`, `get_*`,
+   `check_router_health`, `ping`, or `traceroute`) before it reaches the model;
+6. every tool call is rebound to the connected `routerId`, executed through the shared
+   `MikroMcpClient`, normalized into agent events, and rendered in the transcript.
+
+This is intentionally not a write-capable "ready" mode. The backend RBAC allowlist and the
+agent-side catalog filter both exclude management tools, `apply_plan`, and `run_command`.
+Router output is explicitly identified as untrusted data in the system prompt.
+
 ## Next Block B slices
 
-1. Add preset persistence and implement one OpenAI-compatible adapter before provider-specific
-   branches.
-2. Build a read-only chat loop with dynamic tool schemas and an allowlisted catalog view.
-3. Implement the WAN PPPoE runbook as the first write path: parameter collection,
+1. Add provider warm-up/error diagnostics and optional streaming without changing normalized
+   event contracts.
+2. Implement the WAN PPPoE runbook as the first write path: parameter collection,
    `plan_changes`, human approval, `apply_plan`, mandatory post-check, and rollback choice.
-4. Expand the operator tool allowlist only for tools required by reviewed runbooks.
-5. Add deterministic runbook-selected RAG, golden-path examples, then the full chat UI and
-   `/model` wizard.
+3. Expand the operator tool allowlist only for tools required by reviewed runbooks.
+4. Add deterministic runbook-selected RAG and golden-path examples, then reasoning display and
+   other deferred UI polish.
 
 No model receives raw RouterOS commands, device output as instructions, secret values, or a
 direct path to `apply_plan` without the harness approval state machine.

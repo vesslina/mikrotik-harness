@@ -18,6 +18,7 @@ from mth.core.registration import (
     RegistrationResult,
     RegistrationService,
 )
+from mth.ui.textual.chat import ChatProfile, ChatScreen
 
 Discoverer = Callable[..., DiscoveryResult]
 
@@ -379,9 +380,13 @@ class DiscoveryApp(App[None]):
             )
             self.call_from_thread(self._show_registration_error, wrapped)
             return
-        self.call_from_thread(self._show_connected, result)
+        self.call_from_thread(self._show_connected, result, pending)
 
-    def _show_connected(self, result: RegistrationResult) -> None:
+    def _show_connected(
+        self,
+        result: RegistrationResult,
+        pending: PendingRegistration,
+    ) -> None:
         self._set_connecting(False)
         self._set_status(f"Connected to {result.identity} via MikroMCP.")
         status = result.system_status
@@ -397,6 +402,19 @@ class DiscoveryApp(App[None]):
             f"Router ID: {result.router_id} | RouterOS: {version} | CPU: {cpu} | "
             f"Live MCP tools: {result.tool_count}"
         )
+        device = self._selected_device
+        if device is not None and self._device_address(device) != pending.host:
+            device = None
+        profile = ChatProfile(
+            router_id=result.router_id,
+            address=pending.host,
+            identity=result.identity,
+            version=str(version),
+            board=device.board if device and device.board else "RouterOS",
+            mac=device.mac if device and device.mac else "—",
+            tool_count=result.tool_count,
+        )
+        self.push_screen(ChatScreen(profile, result))
 
     def _show_registration_error(self, error: RegistrationError) -> None:
         self._set_connecting(False)

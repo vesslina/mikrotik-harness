@@ -55,6 +55,11 @@ class MikroMcpConfigStore:
                     return str(router_id), self._normalize_fingerprint(tls["fingerprint"])
         return None
 
+    def runtime_environment(self) -> dict[str, str]:
+        """Load the private child-process environment without exposing it to the UI."""
+
+        return self._load_dotenv()
+
     def persist(self, pending: PendingRegistration) -> dict[str, str]:
         self.paths.root.mkdir(parents=True, exist_ok=True)
         self.paths.data.mkdir(parents=True, exist_ok=True)
