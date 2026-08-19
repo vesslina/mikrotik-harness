@@ -79,8 +79,11 @@ the connected device, RouterOS version, selected model, harness version, and liv
 visible throughout the session.
 
 - `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
-- `/models [name]` lists presets or activates one by name.
+- `/models` opens a keyboard-driven picker for every saved preset; `/models <name>` remains a
+  direct activation shortcut.
 - `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the initial command surface.
+- Typing `/` shows matching commands below the composer; a unique prefix can be completed with
+  `Tab`.
 - `Tab` cycles between `PLAN` and `READY`. PLAN exposes no tools; READY exposes read-only tools
   bound to the connected router only. Write tools, fleet-global tools, `apply_plan`, and
   `run_command` are excluded from this slice.
@@ -89,6 +92,11 @@ An API key entered in `/model` remains in process memory only. Presets under
 `.mth/providers.json` store endpoint/model/capability metadata and optionally an environment
 variable name, never the key value itself. The VS Code setting `python.terminal.useEnvFile` is
 not required by `mth`; RouterOS credentials are passed directly to the pinned child process.
+
+LM Studio reasoning models may return a non-standard `reasoning_content` field while leaving the
+OpenAI-compatible `message.content` empty. The harness recognizes both `reasoning_content` and
+`reasoning`, shows a compact reasoning-status line without dumping hidden reasoning, and recovers
+only an explicitly labelled final-answer section when the provider misplaced it there.
 
 The model never chooses a router ID. Every MCP call is rebound to the currently connected
 router, and RouterOS/device output is framed as untrusted data rather than instructions.

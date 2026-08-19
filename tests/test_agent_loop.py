@@ -14,6 +14,7 @@ from mth.agent import (
     ProviderToolCall,
     ReadOnlyAgentLoop,
     ReasoningControl,
+    ReasoningStatus,
     ToolCallFormat,
 )
 from mth.core.mcp_client.models import McpTool, McpToolResult
@@ -176,6 +177,69 @@ def test_openai_compatible_client_sends_tools_and_parses_tool_call() -> None:
     assert captured["body"]["tools"][0]["function"]["name"] == "get_system_status"
     assert reply.tool_calls[0].name == "get_system_status"
     assert reply.tool_calls[0].arguments == {"routerId": "router"}
+
+
+def test_openai_compatible_client_parses_lm_studio_reasoning_content() -> None:
+    def transport(url, headers, body, timeout) -> bytes:
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning_content": "Thinking\n\nFinal Answer:\nПривет!",
+                            "tool_calls": [],
+                        }
+                    }
+                ],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 18}},
+            }
+        ).encode()
+
+    client = OpenAICompatibleClient(
+        base_url="http://localhost:1234/v1",
+        model="qwen3.5-4b",
+        transport=transport,
+    )
+
+    reply = asyncio.run(client.complete([{"role": "user", "content": "Привет"}]))
+
+    assert reply.content == ""
+    assert reply.reasoning.endswith("Привет!")
+    assert reply.reasoning_tokens == 18
+
+
+def test_loop_recovers_labelled_final_answer_from_reasoning_only_reply() -> None:
+    async def scenario() -> None:
+        class Provider:
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                return ProviderReply(
+                    content="",
+                    tool_calls=(),
+                    reasoning=(
+                        "Thinking Process:\ninternal notes\n\n"
+                        "6. **Output Generation** (in Russian):\n"
+                        "    Привет! Да, я здесь."
+                    ),
+                    reasoning_tokens=42,
+                )
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+        )
+
+        events = await loop.run("Привет", AgentMode.PLAN)
+
+        assert isinstance(events[0], ReasoningStatus)
+        assert events[0].token_count == 42
+        assert events[0].recovered_final_answer is True
+        assert isinstance(events[1], AgentMessage)
+        assert events[1].text == "Привет! Да, я здесь."
+
+    asyncio.run(scenario())
 
 
 def test_read_only_filter_never_exposes_write_or_raw_command() -> None:

@@ -79,14 +79,17 @@ The provider-neutral foundation now includes:
 The first end-to-end agent path is now operational:
 
 1. successful Block A registration opens a dedicated Textual chat screen;
-2. `/model` creates a Local, OpenRouter, or custom OpenAI-compatible preset;
+2. `/model` creates a Local, OpenRouter, or custom OpenAI-compatible preset, while `/models`
+   selects any saved preset from a keyboard-driven modal;
 3. the provider key is held in memory or resolved from a named environment variable;
 4. PLAN mode sends no tools, while READY dynamically fetches the MCP catalog;
 5. the catalog is reduced to router-bound tools with `readOnlyHint=true`,
    `destructiveHint=false`, and an allowed read name (`list_*`, `get_*`,
    `check_router_health`, `ping`, or `traceroute`) before it reaches the model;
 6. every tool call is rebound to the connected `routerId`, executed through the shared
-   `MikroMcpClient`, normalized into agent events, and rendered in the transcript.
+   `MikroMcpClient`, normalized into agent events, and rendered in the transcript;
+7. LM Studio `reasoning_content` is normalized into a compact reasoning-status event, while only
+   a clearly labelled misplaced final answer is recovered as visible assistant text.
 
 This is intentionally not a write-capable "ready" mode. The backend RBAC allowlist and the
 agent-side catalog filter both exclude management tools, `apply_plan`, and `run_command`.
@@ -99,8 +102,8 @@ Router output is explicitly identified as untrusted data in the system prompt.
 2. Implement the WAN PPPoE runbook as the first write path: parameter collection,
    `plan_changes`, human approval, `apply_plan`, mandatory post-check, and rollback choice.
 3. Expand the operator tool allowlist only for tools required by reviewed runbooks.
-4. Add deterministic runbook-selected RAG and golden-path examples, then reasoning display and
-   other deferred UI polish.
+4. Add deterministic runbook-selected RAG and golden-path examples, then richer opt-in reasoning
+   summaries and other deferred UI polish.
 
 No model receives raw RouterOS commands, device output as instructions, secret values, or a
 direct path to `apply_plan` without the harness approval state machine.

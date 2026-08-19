@@ -1,7 +1,7 @@
 import asyncio
 
 from textual.app import App
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
 
 from mth.agent import (
     AgentMessage,
@@ -20,6 +20,7 @@ from mth.core.registration import RegistrationResult
 from mth.ui.textual.chat import (
     ChatProfile,
     ChatScreen,
+    ModelPickerScreen,
     ModelWizardScreen,
     PixelLogo,
 )
@@ -161,4 +162,78 @@ def test_pixel_logo_has_two_five_row_words() -> None:
 
     assert rendered.plain.count("\n") == 9
     assert "█" in rendered.plain
+    assert max(len(line) for line in rendered.plain.splitlines()) <= 46
     assert any("ff3b30" in str(span.style) for span in rendered.spans)
+
+
+def test_slash_command_hints_filter_and_tab_completes(tmp_path) -> None:
+    async def scenario() -> None:
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
+            agent_factory=lambda _preset, _key: _Runner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/mod"
+            await pilot.pause()
+
+            hints = screen.query_one("#command-hints", Static)
+            assert hints.display is True
+            assert "/model" in str(hints.content)
+            assert "/models" in str(hints.content)
+            assert "/help" not in str(hints.content)
+
+            prompt.value = "/cle"
+            await pilot.press("tab")
+            assert prompt.value == "/clear "
+
+    asyncio.run(scenario())
+
+
+def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None:
+    async def scenario() -> None:
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        first = _preset()
+        second = ProviderPreset(
+            name="second",
+            provider=ProviderKind.OPENAI_COMPATIBLE,
+            base_url="http://localhost:20128/v1",
+            model="oc/deepseek-v4-flash-free",
+            capabilities=first.capabilities,
+        )
+        store.save(first)
+        store.save(second, select=False)
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: _Runner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/models"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ModelPickerScreen)
+            picker = app.screen
+            option_list = picker.query_one("#saved-model-list", OptionList)
+            option_list.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ChatScreen)
+            assert "oc/deepseek-v4-flash-free" in str(
+                screen.query_one("#device-info", Static).content
+            )
+            assert store.selected() == second
+
+    asyncio.run(scenario())

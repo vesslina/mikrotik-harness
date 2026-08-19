@@ -11,7 +11,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, Label, RichLog, Select, Static
+from textual.widgets import Button, Input, Label, OptionList, RichLog, Select, Static
+from textual.widgets.option_list import Option
 
 from mth import __version__
 from mth.agent import (
@@ -29,6 +30,7 @@ from mth.agent import (
     ProviderPresetStore,
     ReadOnlyAgentLoop,
     ReasoningControl,
+    ReasoningStatus,
     ToolCall,
     ToolCallFormat,
     ToolResult,
@@ -67,7 +69,7 @@ class PixelLogo(Static):
         "A": ("01110", "10001", "11111", "10001", "10001"),
         "E": ("11111", "10000", "11110", "10000", "11111"),
         "H": ("10001", "10001", "11111", "10001", "10001"),
-        "I": ("11111", "00100", "00100", "00100", "11111"),
+        "I": ("111", "010", "010", "010", "111"),
         "K": ("10001", "10010", "11100", "10010", "10001"),
         "M": ("10001", "11011", "10101", "10001", "10001"),
         "N": ("10001", "11001", "10101", "10011", "10001"),
@@ -228,7 +230,96 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
         self.query_one("#model-error", Static).update(message)
 
 
+class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    CSS = """
+    ModelPickerScreen { align: center middle; }
+    #model-picker-dialog {
+        width: 88;
+        height: auto;
+        max-height: 24;
+        padding: 1 2;
+        border: round #ff3b30;
+        background: #111315;
+    }
+    #model-picker-title { height: 2; color: white; text-style: bold; }
+    #saved-model-list {
+        height: auto;
+        max-height: 14;
+        border: solid #40464d;
+        background: #090909;
+    }
+    #model-picker-help { height: 2; padding-top: 1; color: #8b949e; }
+    #model-picker-actions { height: auto; margin-top: 1; align-horizontal: right; }
+    #model-picker-actions Button { margin-left: 1; }
+    """
+
+    def __init__(
+        self,
+        presets: tuple[ProviderPreset, ...],
+        selected_name: str | None,
+    ) -> None:
+        super().__init__()
+        self._presets = presets
+        self._selected_name = selected_name
+
+    def compose(self) -> ComposeResult:
+        options = [
+            Option(
+                f"{preset.name}  ·  {preset.provider}  ·  {preset.model}\n"
+                f"    {preset.base_url}"
+            )
+            for preset in self._presets
+        ]
+        with Vertical(id="model-picker-dialog"):
+            yield Static("Saved models", id="model-picker-title")
+            yield OptionList(*options, id="saved-model-list", markup=False)
+            yield Static("↑/↓ choose  ·  Enter activate  ·  Esc cancel", id="model-picker-help")
+            with Horizontal(id="model-picker-actions"):
+                yield Button("Cancel", id="cancel-picker")
+                yield Button("Use model", id="use-saved-model", variant="primary")
+
+    def on_mount(self) -> None:
+        option_list = self.query_one("#saved-model-list", OptionList)
+        selected_index = next(
+            (
+                index
+                for index, preset in enumerate(self._presets)
+                if preset.name == self._selected_name
+            ),
+            0,
+        )
+        option_list.highlighted = selected_index
+        option_list.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self._presets[event.option_index])
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-picker":
+            self.dismiss(None)
+        elif event.button.id == "use-saved-model":
+            option_list = self.query_one("#saved-model-list", OptionList)
+            index = option_list.highlighted
+            if index is not None:
+                self.dismiss(self._presets[index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ChatScreen(Screen[None]):
+    SLASH_COMMANDS = (
+        ("/help", "show commands"),
+        ("/info", "router and session info"),
+        ("/model", "add or edit a model"),
+        ("/models", "choose a saved model"),
+        ("/log", "session log info"),
+        ("/clear", "clear transcript"),
+        ("/exit", "return to discovery"),
+    )
+
     BINDINGS = [
         Binding("tab", "cycle_mode", "Cycle mode", show=False, priority=True),
         Binding("ctrl+l", "clear_chat", "Clear", show=False),
@@ -242,8 +333,8 @@ class ChatScreen(Screen[None]):
         background: #090909;
         border-bottom: solid #5b6268;
     }
-    #brand { width: 46; height: 11; background: #090909; }
-    #device-info { width: 1fr; height: 11; padding-left: 3; color: #9aa2aa; }
+    #brand { width: 46; min-width: 46; height: 11; background: #090909; }
+    #device-info { width: 1fr; height: 11; padding-left: 2; color: #9aa2aa; }
     #transcript { height: 1fr; padding: 1 3; background: #090909; scrollbar-color: #5b6268; }
     #composer {
         height: 3;
@@ -255,6 +346,14 @@ class ChatScreen(Screen[None]):
     #prompt-mark { width: 3; height: 3; padding: 0 0 0 1; content-align: left middle; }
     #chat-input { width: 1fr; height: 3; border: none; background: #090909; color: white; }
     #chat-input:focus { border: none; }
+    #command-hints {
+        display: none;
+        height: auto;
+        max-height: 4;
+        padding: 0 3 1 3;
+        color: #9aa2aa;
+        background: #090909;
+    }
     #mode-line { height: 3; padding: 1 3; color: #6fd3df; background: #090909; }
     """
 
@@ -274,6 +373,7 @@ class ChatScreen(Screen[None]):
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
         self._mode = AgentMode.PLAN
+        self._session_api_keys: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -286,6 +386,7 @@ class ChatScreen(Screen[None]):
                 placeholder="Ask about this MikroTik, or type /help",
                 id="chat-input",
             )
+        yield Static("", id="command-hints", markup=False)
         yield Static("", id="mode-line", markup=False)
 
     def on_mount(self) -> None:
@@ -317,7 +418,18 @@ class ChatScreen(Screen[None]):
             return
         self._submit_prompt(value)
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "chat-input":
+            self._refresh_command_hints(event.value)
+
     def action_cycle_mode(self) -> None:
+        input_widget = self.query_one("#chat-input", Input)
+        matches = self._matching_commands(input_widget.value)
+        if matches:
+            if len(matches) == 1:
+                input_widget.value = matches[0][0] + " "
+                input_widget.cursor_position = len(input_widget.value)
+            return
         self._mode = AgentMode.READY if self._mode is AgentMode.PLAN else AgentMode.PLAN
         self._refresh_mode()
 
@@ -365,17 +477,22 @@ class ChatScreen(Screen[None]):
         if not presets:
             self._write_system("No saved presets. Use /model.")
             return
-        lines = [
-            f"{'*' if self._preset and self._preset.name == preset.name else ' '} "
-            f"{preset.name}: {preset.provider} · {preset.model} · {preset.base_url}"
-            for preset in presets
-        ]
-        self._write_system("Saved models:\n" + "\n".join(lines))
+        selected_name = self._preset.name if self._preset else None
+        self.app.push_screen(
+            ModelPickerScreen(presets, selected_name),
+            self._saved_model_selected,
+        )
 
     def _model_selected(self, selection: ModelSelection | None) -> None:
         if selection is None:
             return
         self._activate_preset(selection.preset, selection.api_key)
+
+    def _saved_model_selected(self, preset: ProviderPreset | None) -> None:
+        if preset is None:
+            return
+        api_key = self._session_api_keys.get(preset.name) or self._preset_store.api_key(preset)
+        self._activate_preset(preset, api_key)
 
     def _activate_preset(
         self,
@@ -391,6 +508,8 @@ class ChatScreen(Screen[None]):
         except (OSError, ValueError) as error:
             self._write_system(f"Model preset failed: {error}", error=True)
             return
+        if api_key:
+            self._session_api_keys[preset.name] = api_key
         self._preset = preset
         self._agent = agent
         self._refresh_header()
@@ -423,6 +542,8 @@ class ChatScreen(Screen[None]):
             self._write_system("Select a model first with /model.", error=True)
             return
         self.query_one("#chat-input", Input).disabled = True
+        model = self._preset.model if self._preset else "model"
+        self.query_one("#mode-line", Static).update(f"✦ {model} is thinking…")
         self._run_agent(prompt)
 
     @work(exclusive=True, group="agent", exit_on_error=False)
@@ -441,11 +562,21 @@ class ChatScreen(Screen[None]):
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
             input_widget.focus()
+            self._refresh_mode()
 
     def _render_event(self, event: AgentEvent) -> None:
         log = self.query_one("#transcript", RichLog)
         if isinstance(event, AgentMessage):
             log.write(Text(event.text, style="white"))
+        elif isinstance(event, ReasoningStatus):
+            detail = (
+                f"{event.token_count} reasoning tokens"
+                if event.token_count is not None
+                else "reasoning received"
+            )
+            if event.recovered_final_answer:
+                detail += " · final answer recovered"
+            log.write(Text(f"  ✦ {detail}", style="#b9a0ff"))
         elif isinstance(event, PlannedAction):
             log.write(Text(f"  · {event.summary}", style="#6fd3df"))
         elif isinstance(event, ToolCall):
@@ -478,6 +609,19 @@ class ChatScreen(Screen[None]):
     def _refresh_mode(self) -> None:
         label = "PLAN" if self._mode is AgentMode.PLAN else "READY · read-only tools"
         self.query_one("#mode-line", Static).update(f"▮▮ {label}  (Tab to cycle)")
+
+    @classmethod
+    def _matching_commands(cls, value: str) -> tuple[tuple[str, str], ...]:
+        candidate = value.strip().lower()
+        if not candidate.startswith("/") or " " in candidate:
+            return ()
+        return tuple(item for item in cls.SLASH_COMMANDS if item[0].startswith(candidate))
+
+    def _refresh_command_hints(self, value: str) -> None:
+        hints = self.query_one("#command-hints", Static)
+        matches = self._matching_commands(value)
+        hints.display = bool(matches)
+        hints.update("    ".join(f"{command} — {description}" for command, description in matches))
 
     def _info_text(self) -> str:
         model = self._preset.model if self._preset else "not selected"

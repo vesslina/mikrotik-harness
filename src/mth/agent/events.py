@@ -28,6 +28,13 @@ class AgentMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningStatus:
+    token_count: int | None
+    recovered_final_answer: bool = False
+    kind: str = field(default="reasoning_status", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedAction:
     summary: str
     tool_names: tuple[str, ...]
@@ -79,6 +86,7 @@ class FinalSummary:
 
 AgentEvent: TypeAlias = (
     AgentMessage
+    | ReasoningStatus
     | PlannedAction
     | ToolCall
     | ToolResult

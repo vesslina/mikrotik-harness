@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import textwrap
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Protocol, cast
@@ -13,6 +15,7 @@ from mth.agent.events import (
     FinalSummary,
     JsonValue,
     PlannedAction,
+    ReasoningStatus,
     RiskLevel,
     ToolCall,
     ToolResult,
@@ -69,7 +72,27 @@ class ReadOnlyAgentLoop:
         for _round in range(self.MAX_TOOL_ROUNDS):
             reply = await self._provider.complete(messages, tools)
             if not reply.tool_calls:
-                text = reply.content.strip() or "No response was produced."
+                text = reply.content.strip()
+                recovered = False
+                if not text and reply.reasoning.strip():
+                    recovered_text = self._recover_final_answer(reply.reasoning)
+                    if recovered_text:
+                        text = recovered_text
+                        recovered = True
+                if reply.reasoning.strip():
+                    events.append(
+                        ReasoningStatus(
+                            token_count=reply.reasoning_tokens,
+                            recovered_final_answer=recovered,
+                        )
+                    )
+                if not text:
+                    text = (
+                        "The model completed reasoning but did not produce a final answer. "
+                        "Try again or raise the model's output-token limit."
+                        if reply.reasoning.strip()
+                        else "No response was produced."
+                    )
                 events.append(AgentMessage(text))
                 events.append(FinalSummary(text, FinalOutcome.COMPLETED))
                 return tuple(events)
@@ -117,6 +140,19 @@ class ReadOnlyAgentLoop:
         summary = "Stopped after the maximum number of read-only tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
         return tuple(events)
+
+    @staticmethod
+    def _recover_final_answer(reasoning: str) -> str:
+        """Recover a clearly labelled final answer from reasoning-only local responses."""
+        marker = re.compile(
+            r"(?im)^\s*(?:\d+\.\s*)?\*{0,2}"
+            r"(?:final answer|final response|output generation)"
+            r"\*{0,2}(?:\s*\([^\n)]*\))?\s*:?\s*$"
+        )
+        matches = tuple(marker.finditer(reasoning))
+        if not matches:
+            return ""
+        return textwrap.dedent(reasoning[matches[-1].end() :]).strip()
 
     @classmethod
     def filter_read_only_tools(cls, tools: Sequence[McpTool]) -> tuple[McpTool, ...]:

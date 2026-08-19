@@ -36,6 +36,8 @@ class ProviderToolCall:
 class ProviderReply:
     content: str
     tool_calls: tuple[ProviderToolCall, ...]
+    reasoning: str = ""
+    reasoning_tokens: int | None = None
 
 
 class ChatProvider(Protocol):
@@ -153,6 +155,20 @@ class OpenAICompatibleClient:
         content = message.get("content") or ""
         if not isinstance(content, str):
             raise TypeError("message content is not text")
+        reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+        if not isinstance(reasoning, str):
+            raise TypeError("message reasoning is not text")
+
+        reasoning_tokens: int | None = None
+        usage = document.get("usage")
+        if isinstance(usage, dict):
+            details = usage.get("completion_tokens_details")
+            if isinstance(details, dict):
+                raw_reasoning_tokens = details.get("reasoning_tokens")
+                if isinstance(raw_reasoning_tokens, int) and not isinstance(
+                    raw_reasoning_tokens, bool
+                ):
+                    reasoning_tokens = raw_reasoning_tokens
 
         calls: list[ProviderToolCall] = []
         raw_calls = message.get("tool_calls") or []
@@ -172,7 +188,12 @@ class OpenAICompatibleClient:
                     arguments=arguments,
                 )
             )
-        return ProviderReply(content=content, tool_calls=tuple(calls))
+        return ProviderReply(
+            content=content,
+            tool_calls=tuple(calls),
+            reasoning=reasoning,
+            reasoning_tokens=reasoning_tokens,
+        )
 
     @staticmethod
     def _http_error_detail(error: urllib.error.HTTPError) -> str:
