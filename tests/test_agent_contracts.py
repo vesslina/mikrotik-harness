@@ -66,3 +66,15 @@ def test_normalized_events_have_stable_kind_and_risk() -> None:
     assert message.kind == "agent_message"
     assert tool_call.kind == "tool_call"
     assert tool_call.risk is RiskLevel.READ_ONLY
+
+
+def test_sensitive_tool_opt_in_is_rejected_for_non_loopback_endpoint() -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        ProviderPreset(
+            name="remote",
+            provider=ProviderKind.OPENAI_COMPATIBLE,
+            base_url="http://192.168.56.1:1234/v1",
+            model="remote-model",
+            allow_sensitive_tool_data=True,
+            capabilities=_capabilities(),
+        )

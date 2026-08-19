@@ -124,6 +124,8 @@ def test_pppoe_plan_apply_and_verify_keep_secret_out_of_plan() -> None:
         assert "isp-secret" not in plan.preview
         assert "isp-secret" not in plan.summary
         assert result.verified is True
+        assert result.operational is False
+        assert "not currently running" in result.verification_details
         assert result.journal_ids == ("journal-1",)
         assert backend.open_count == 1
         assert [name for name, _ in backend.calls[-3:]] == [

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 
 from mth.agent import (
     AgentMessage,
@@ -16,7 +17,9 @@ from mth.agent import (
     ReadOnlyAgentLoop,
     ReasoningControl,
     ReasoningStatus,
+    RunbookProposal,
     ToolCallFormat,
+    ToolResult,
 )
 from mth.core.mcp_client.models import McpTool, McpToolResult
 
@@ -95,7 +98,8 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
 
         events = await loop.run("Show interfaces", AgentMode.READY)
 
-        assert provider.tool_names == [("list_interfaces",), ("list_interfaces",)]
+        expected_tools = ("list_interfaces", "propose_wan_pppoe")
+        assert provider.tool_names == [expected_tools, expected_tools]
         assert backend.arguments == {"routerId": "mikrotik-afe23e"}
         assert backend.catalog_calls == 1
         assert any(isinstance(event, PlannedAction) for event in events)
@@ -283,3 +287,122 @@ def test_read_only_filter_never_exposes_write_or_raw_command() -> None:
     filtered = ReadOnlyAgentLoop.filter_read_only_tools(tools)
 
     assert tuple(tool.name for tool in filtered) == ("get_log", "list_bridges")
+
+
+def test_tool_secrets_are_redacted_before_events_and_model_context() -> None:
+    async def scenario() -> None:
+        class Backend(_Backend):
+            async def call_tool(self, name, arguments=None) -> McpToolResult:
+                self.arguments = arguments
+                return McpToolResult(
+                    ("password: 12345",),
+                    {
+                        "clients": [
+                            {
+                                "name": "pppoe-wan",
+                                "password": "12345",
+                                "nested": {"private-key": "secret-key"},
+                            }
+                        ]
+                    },
+                    False,
+                )
+
+        class Provider(_Provider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.seen_messages = ()
+
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                self.seen_messages = messages
+                return await super().complete(messages, tools)
+
+        provider = Provider()
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=provider,
+            backend=Backend(),
+            router_id="mikrotik-afe23e",
+        )
+
+        events = await loop.run("Show PPPoE", AgentMode.READY)
+
+        serialized = json.dumps(provider.seen_messages, ensure_ascii=False)
+        assert "12345" not in serialized
+        assert "secret-key" not in serialized
+        assert "[REDACTED]" in serialized
+        result = next(event for event in events if isinstance(event, ToolResult))
+        assert result.structured_content is not None
+        assert result.structured_content["clients"][0]["password"] == "[REDACTED]"
+
+    asyncio.run(scenario())
+
+
+def test_loopback_opt_in_can_expose_sensitive_tool_data() -> None:
+    async def scenario() -> None:
+        class Backend(_Backend):
+            async def call_tool(self, name, arguments=None) -> McpToolResult:
+                return McpToolResult((), {"password": "local-secret"}, False)
+
+        class Provider(_Provider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.seen_messages = ()
+
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                self.seen_messages = messages
+                return await super().complete(messages, tools)
+
+        provider = Provider()
+        loop = ReadOnlyAgentLoop(
+            preset=replace(_preset(), allow_sensitive_tool_data=True),
+            provider=provider,
+            backend=Backend(),
+            router_id="mikrotik-afe23e",
+        )
+
+        await loop.run("Show PPPoE", AgentMode.READY)
+
+        assert "local-secret" in json.dumps(provider.seen_messages)
+
+    asyncio.run(scenario())
+
+
+def test_pppoe_intent_becomes_harness_proposal_without_backend_write() -> None:
+    async def scenario() -> None:
+        class Provider:
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                assert "propose_wan_pppoe" in {tool.name for tool in tools}
+                return ProviderReply(
+                    "",
+                    (
+                        ProviderToolCall(
+                            "proposal-1",
+                            "propose_wan_pppoe",
+                            {
+                                "interface": "ether2",
+                                "username": "isp-user",
+                                "password": "must-be-ignored",
+                            },
+                        ),
+                    ),
+                )
+
+        backend = _Backend()
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=backend,
+            router_id="mikrotik-afe23e",
+        )
+
+        events = await loop.run("Configure PPPoE on ether2", AgentMode.READY)
+
+        proposal = next(event for event in events if isinstance(event, RunbookProposal))
+        assert proposal.runbook == "wan_pppoe"
+        assert proposal.parameters["interface"] == "ether2"
+        assert proposal.parameters["username"] == "isp-user"
+        assert "password" not in proposal.parameters
+        assert backend.arguments is None
+
+    asyncio.run(scenario())

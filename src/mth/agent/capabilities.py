@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 
@@ -66,6 +67,7 @@ class ProviderPreset:
     model: str
     capabilities: ModelCapabilities
     api_key_env: str | None = None
+    allow_sensitive_tool_data: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -79,6 +81,22 @@ class ProviderPreset:
             r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env
         ):
             raise ValueError("api_key_env must be an environment variable name")
+        if self.allow_sensitive_tool_data and not self.is_loopback_endpoint:
+            raise ValueError(
+                "Sensitive tool data can be exposed only to a loopback LLM endpoint"
+            )
+
+    @property
+    def is_loopback_endpoint(self) -> bool:
+        hostname = urlparse(self.base_url).hostname
+        if hostname is None:
+            return False
+        if hostname.casefold() == "localhost":
+            return True
+        try:
+            return ip_address(hostname).is_loopback
+        except ValueError:
+            return False
 
     def require_agent_loop_support(self) -> None:
         self.capabilities.require_agent_loop_support()

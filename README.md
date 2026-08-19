@@ -84,6 +84,9 @@ visible throughout the session.
 - `/pppoe` opens the masked WAN PPPoE wizard in READY mode. It builds a live dry-run plan,
   requires an explicit human approval, applies through MikroMCP, and verifies the resulting
   interface.
+- A natural-language request to add or configure WAN PPPoE can call the harness-owned
+  `propose_wan_pppoe` handoff. It only opens the same editable masked wizard; it is not a
+  backend write and cannot bypass dry-run, approval, confirmation, verification, or rollback.
 - `/rollback [journal-id]` previews and confirms rollback of a PPPoE change created in the
   current session; omitting the ID selects the most recent eligible change.
 - `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface.
@@ -98,6 +101,13 @@ An API key entered in `/model` remains in process memory only. Presets under
 variable name, never the key value itself. The VS Code setting `python.terminal.useEnvFile` is
 not required by `mth`; RouterOS credentials are passed directly to the pinned child process.
 
+MCP tool results are recursively redacted before both the transcript event and the next LLM
+request. Credential-shaped fields such as passwords, API keys, private keys, communities, and
+tokens are protected by default, including values nested inside `structuredContent`. A model
+preset may explicitly expose those fields only when its URL resolves syntactically to a
+loopback endpoint (`localhost`, `127.0.0.0/8`, or `::1`); non-loopback presets fail validation.
+This local privacy override is off by default and is visibly announced when active.
+
 Selecting a model triggers a hidden tool-free warm-up probe. Success reports latency; connection,
 authentication, model-name, and malformed-response failures retain distinct error codes.
 
@@ -106,8 +116,9 @@ OpenAI-compatible `message.content` empty. The harness recognizes both `reasonin
 `reasoning`, shows a compact reasoning-status line without dumping hidden reasoning, and recovers
 only an explicitly labelled final-answer section when the provider misplaced it there.
 
-The model never chooses a router ID. Every MCP call is rebound to the currently connected
-router, and RouterOS/device output is framed as untrusted data rather than instructions.
+The model never chooses a router ID. Every backend MCP call is rebound to the currently
+connected router, and RouterOS/device output is framed as untrusted data rather than
+instructions.
 
 ## Headless discovery
 

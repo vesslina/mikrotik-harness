@@ -89,6 +89,7 @@ class ProviderPresetStore:
             "base_url": preset.base_url,
             "model": preset.model,
             "api_key_env": preset.api_key_env,
+            "allow_sensitive_tool_data": preset.allow_sensitive_tool_data,
             "capabilities": {
                 "supports_tools": capabilities.supports_tools,
                 "supports_streaming": capabilities.supports_streaming,
@@ -105,6 +106,11 @@ class ProviderPresetStore:
         capabilities = raw.get("capabilities")
         if not isinstance(capabilities, dict):
             raise ValueError(f"Preset {name!r} has no capability matrix")
+        allow_sensitive = raw.get("allow_sensitive_tool_data", False)
+        if not isinstance(allow_sensitive, bool):
+            raise ValueError(
+                f"Preset {name!r} has an invalid sensitive-tool-data policy"
+            )
         return ProviderPreset(
             name=name,
             provider=ProviderKind(str(raw["provider"])),
@@ -113,6 +119,7 @@ class ProviderPresetStore:
             api_key_env=(
                 str(raw["api_key_env"]) if raw.get("api_key_env") is not None else None
             ),
+            allow_sensitive_tool_data=allow_sensitive,
             capabilities=ModelCapabilities(
                 supports_tools=bool(capabilities["supports_tools"]),
                 supports_streaming=bool(capabilities["supports_streaming"]),

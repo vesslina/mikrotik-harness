@@ -80,6 +80,7 @@ class PppoeApplyResult:
     verified: bool
     verification_details: str
     backend_summary: str
+    operational: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,17 +144,19 @@ class PppoeRunbookExecutor:
         journal_ids = self._journal_ids(applied)
         if verification.is_error:
             verified = False
+            operational = None
             details = (
                 "The PPPoE change was applied, but the mandatory post-check failed: "
                 f"{verification.text}"
             )
         else:
-            verified, details = self._verify(plan.request, verification)
+            verified, operational, details = self._verify(plan.request, verification)
         return PppoeApplyResult(
             journal_ids=journal_ids,
             verified=verified,
             verification_details=details,
             backend_summary=applied.text,
+            operational=operational,
         )
 
     async def preview_rollback(self, journal_id: str) -> PppoeRollbackPreview:
@@ -294,11 +297,14 @@ class PppoeRunbookExecutor:
         )
 
     @staticmethod
-    def _verify(request: PppoeRequest, result: McpToolResult) -> tuple[bool, str]:
+    def _verify(
+        request: PppoeRequest,
+        result: McpToolResult,
+    ) -> tuple[bool, bool | None, str]:
         structured = result.structured_content or {}
         clients = structured.get("clients")
         if not isinstance(clients, list):
-            return False, "PPPoE verification returned no client list."
+            return False, None, "PPPoE verification returned no client list."
         match = next(
             (
                 client
@@ -308,16 +314,41 @@ class PppoeRunbookExecutor:
             None,
         )
         if not isinstance(match, dict):
-            return False, f'PPPoE client "{request.name}" was not found after apply.'
+            return False, None, f'PPPoE client "{request.name}" was not found after apply.'
         if match.get("interface") != request.interface or match.get("user") != request.username:
             return (
                 False,
+                None,
                 f'PPPoE client "{request.name}" exists but differs from the approved plan.',
             )
-        running = str(match.get("running", match.get("status", "unknown")))
+        disabled = match.get("disabled")
+        running = match.get("running")
+        if disabled is True:
+            return (
+                True,
+                False,
+                f'PPPoE client "{request.name}" matches the approved configuration; '
+                "the interface is disabled and operationally inactive.",
+            )
+        if running is True:
+            return (
+                True,
+                True,
+                f'PPPoE client "{request.name}" matches the approved configuration and '
+                "the session is active.",
+            )
+        if running is False:
+            return (
+                True,
+                False,
+                f'PPPoE client "{request.name}" matches the approved configuration; '
+                "the session is not currently running.",
+            )
         return (
             True,
-            f'PPPoE client "{request.name}" exists with approved parameters; status={running}.',
+            None,
+            f'PPPoE client "{request.name}" matches the approved configuration; '
+            "RouterOS did not report an operational state.",
         )
 
     @staticmethod

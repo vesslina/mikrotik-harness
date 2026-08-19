@@ -14,6 +14,7 @@ from mth.agent import (
     ProviderPreset,
     ProviderPresetStore,
     ReasoningControl,
+    RunbookProposal,
     ToolCallFormat,
 )
 from mth.core.registration import RegistrationResult
@@ -328,5 +329,54 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
 
             assert isinstance(app.screen, ChatScreen)
             assert pppoe.rollback_journal == "journal-1"
+
+    asyncio.run(scenario())
+
+
+def test_agent_pppoe_proposal_opens_prefilled_masked_runbook(tmp_path) -> None:
+    async def scenario() -> None:
+        class ProposalRunner:
+            async def run(self, prompt: str, mode: AgentMode):
+                assert mode is AgentMode.READY
+                return (
+                    RunbookProposal(
+                        "wan_pppoe",
+                        {
+                            "name": "isp-uplink",
+                            "interface": "ether3",
+                            "username": "subscriber",
+                            "serviceName": "internet",
+                            "addDefaultRoute": True,
+                            "dialOnDemand": False,
+                        },
+                    ),
+                    FinalSummary("Runbook proposed.", FinalOutcome.COMPLETED),
+                )
+
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: ProposalRunner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 45)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "Настрой PPPoE на ether3"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert isinstance(app.screen, PppoeWizardScreen)
+            wizard = app.screen
+            assert wizard.query_one("#pppoe-name", Input).value == "isp-uplink"
+            assert wizard.query_one("#pppoe-interface", Input).value == "ether3"
+            assert wizard.query_one("#pppoe-username", Input).value == "subscriber"
+            assert wizard.query_one("#pppoe-password", Input).value == ""
 
     asyncio.run(scenario())

@@ -32,6 +32,7 @@ from mth.agent import (
     ReadOnlyAgentLoop,
     ReasoningControl,
     ReasoningStatus,
+    RunbookProposal,
     ToolCall,
     ToolCallFormat,
     ToolResult,
@@ -150,12 +151,13 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
     #model-dialog {
         width: 84;
         height: auto;
-        max-height: 32;
+        max-height: 36;
         padding: 1 2;
         border: round #ff3b30;
         background: #111315;
     }
     #model-dialog .model-row { height: 3; }
+    #model-dialog .model-option { height: 3; padding-left: 22; }
     #model-dialog .field-label {
         width: 22;
         height: 3;
@@ -211,6 +213,12 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
             with Horizontal(classes="model-row"):
                 yield Label("Max context tokens", classes="field-label")
                 yield Input(value="32768", id="context-tokens", type="integer")
+            with Horizontal(classes="model-option"):
+                yield Checkbox(
+                    "Expose secrets to this LLM (loopback endpoints only)",
+                    value=False,
+                    id="allow-sensitive-tool-data",
+                )
             yield Static("", id="model-error", markup=False)
             with Horizontal(id="model-actions"):
                 yield Button("Cancel", id="cancel-model")
@@ -248,6 +256,9 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                 base_url=self.query_one("#provider-url", Input).value.strip(),
                 model=self.query_one("#model-name", Input).value.strip(),
                 api_key_env=self.query_one("#api-key-env", Input).value.strip() or None,
+                allow_sensitive_tool_data=self.query_one(
+                    "#allow-sensitive-tool-data", Checkbox
+                ).value,
                 capabilities=ModelCapabilities(
                     supports_tools=True,
                     supports_streaming=False,
@@ -368,26 +379,74 @@ class PppoeWizardScreen(ModalScreen[PppoeSelection | None]):
     #pppoe-actions Button { margin-left: 1; }
     """
 
+    def __init__(self, proposal: RunbookProposal | None = None) -> None:
+        super().__init__()
+        self._proposal = proposal
+
+    def _proposed_string(self, name: str, default: str = "") -> str:
+        if self._proposal is None:
+            return default
+        value = self._proposal.parameters.get(name)
+        return value if isinstance(value, str) else default
+
+    def _proposed_bool(self, name: str, default: bool) -> bool:
+        if self._proposal is None:
+            return default
+        value = self._proposal.parameters.get(name)
+        return value if isinstance(value, bool) else default
+
     def compose(self) -> ComposeResult:
         with Vertical(id="pppoe-dialog"):
             yield Static("WAN PPPoE runbook", classes="dialog-title")
             yield Static(
-                "The password stays in this masked form and is never sent to the LLM.",
+                (
+                    "The LLM proposed editable values; no change has been made. "
+                    "The password stays in this masked form and is never sent to the LLM."
+                    if self._proposal is not None
+                    else "The password stays in this masked form and is never sent to the LLM."
+                ),
                 markup=False,
             )
             for label, widget in (
-                ("Client name", Input(value="pppoe-wan", id="pppoe-name")),
-                ("Parent interface", Input(value="ether1", id="pppoe-interface")),
-                ("ISP username", Input(id="pppoe-username")),
+                (
+                    "Client name",
+                    Input(value=self._proposed_string("name", "pppoe-wan"), id="pppoe-name"),
+                ),
+                (
+                    "Parent interface",
+                    Input(
+                        value=self._proposed_string("interface", "ether1"),
+                        id="pppoe-interface",
+                    ),
+                ),
+                (
+                    "ISP username",
+                    Input(value=self._proposed_string("username"), id="pppoe-username"),
+                ),
                 ("ISP password", Input(password=True, id="pppoe-password")),
-                ("Service name", Input(placeholder="optional", id="pppoe-service")),
+                (
+                    "Service name",
+                    Input(
+                        value=self._proposed_string("serviceName"),
+                        placeholder="optional",
+                        id="pppoe-service",
+                    ),
+                ),
             ):
                 with Horizontal(classes="pppoe-row"):
                     yield Label(label, classes="field-label")
                     yield widget
             with Horizontal(id="pppoe-options"):
-                yield Checkbox("Add default route", value=True, id="pppoe-default-route")
-                yield Checkbox("Dial on demand", value=False, id="pppoe-dial-demand")
+                yield Checkbox(
+                    "Add default route",
+                    value=self._proposed_bool("addDefaultRoute", True),
+                    id="pppoe-default-route",
+                )
+                yield Checkbox(
+                    "Dial on demand",
+                    value=self._proposed_bool("dialOnDemand", False),
+                    id="pppoe-dial-demand",
+                )
             yield Static("", id="pppoe-error", markup=False)
             with Horizontal(id="pppoe-actions"):
                 yield Button("Cancel", id="cancel-pppoe")
@@ -672,6 +731,11 @@ class ChatScreen(Screen[None]):
         self._agent = agent
         self._refresh_header()
         self._write_system(f"Model selected: {preset.model} via {preset.provider}.")
+        if preset.allow_sensitive_tool_data:
+            self._write_system(
+                "Local privacy override active: sensitive MCP fields are visible to this "
+                "loopback LLM.",
+            )
         warm_up = getattr(agent, "warm_up", None)
         if callable(warm_up):
             self._warm_up_model()
@@ -784,7 +848,14 @@ class ChatScreen(Screen[None]):
             journals = ", ".join(result.journal_ids) or "not returned"
             for journal_id in result.journal_ids:
                 self._pppoe_journals[journal_id] = plan.request
-            outcome = "applied and verified" if result.verified else "applied; verification failed"
+            if not result.verified:
+                outcome = "applied; configuration verification failed"
+            elif result.operational is True:
+                outcome = "configuration applied and verified; session active"
+            elif result.operational is False:
+                outcome = "configuration applied and verified; session inactive"
+            else:
+                outcome = "configuration applied and verified; session state unknown"
             message = f"WAN PPPoE {outcome}.\n{result.verification_details}\n"
             message += f"Rollback journal: {journals}\n"
             if result.journal_ids:
@@ -890,8 +961,14 @@ class ChatScreen(Screen[None]):
         except Exception as error:
             self._write_system(f"Agent loop failed: {error}", error=True)
         else:
+            proposal = next(
+                (event for event in events if isinstance(event, RunbookProposal)),
+                None,
+            )
             for event in events:
                 self._render_event(event)
+            if proposal is not None:
+                self.app.push_screen(PppoeWizardScreen(proposal), self._pppoe_selected)
         finally:
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
@@ -919,6 +996,13 @@ class ChatScreen(Screen[None]):
             status = "error" if event.is_error else "done"
             style = "#ff6b62" if event.is_error else "#7fd88f"
             log.write(Text(f"    ↳ {status}", style=style))
+        elif isinstance(event, RunbookProposal):
+            log.write(
+                Text(
+                    "  ↳ WAN PPPoE proposal ready · opening editable approval form",
+                    style="#ffb454",
+                )
+            )
         elif isinstance(event, VerificationResult):
             style = "#7fd88f" if event.passed else "#ff6b62"
             log.write(Text(f"  verify: {event.check} — {event.details}", style=style))

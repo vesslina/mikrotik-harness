@@ -43,6 +43,13 @@ class PlannedAction:
 
 
 @dataclass(frozen=True, slots=True)
+class RunbookProposal:
+    runbook: str
+    parameters: dict[str, JsonValue]
+    kind: str = field(default="runbook_proposal", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     call_id: str
     tool_name: str
@@ -88,6 +95,7 @@ AgentEvent: TypeAlias = (
     AgentMessage
     | ReasoningStatus
     | PlannedAction
+    | RunbookProposal
     | ToolCall
     | ToolResult
     | ApprovalRequest
