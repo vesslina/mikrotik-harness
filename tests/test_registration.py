@@ -85,6 +85,8 @@ def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_pa
     assert operator["role"] == "operator"
     assert operator["allowedRouters"] == [pending.router_id]
     assert "check_router_health" in operator["allowedToolPatterns"]
+    assert "manage_pppoe_client" in operator["allowedToolPatterns"]
+    assert "apply_plan" in operator["allowedToolPatterns"]
     assert environment["ROUTER_MIKROTIK_AFE23E_PASS"] == "top-secret"
     assert "top-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
 

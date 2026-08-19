@@ -42,6 +42,17 @@ class ConfigPaths:
 
 class MikroMcpConfigStore:
     OPERATOR_ID = "mth-operator"
+    OPERATOR_TOOL_PATTERNS = (
+        "list_*",
+        "get_*",
+        "check_router_health",
+        "ping",
+        "traceroute",
+        "plan_changes",
+        "apply_plan",
+        "rollback_change",
+        "manage_pppoe_client",
+    )
 
     def __init__(self, paths: ConfigPaths | None = None) -> None:
         self.paths = paths or ConfigPaths()
@@ -58,6 +69,7 @@ class MikroMcpConfigStore:
     def runtime_environment(self) -> dict[str, str]:
         """Load the private child-process environment without exposing it to the UI."""
 
+        self._ensure_operator_policy()
         return self._load_dotenv()
 
     def persist(self, pending: PendingRegistration) -> dict[str, str]:
@@ -85,13 +97,7 @@ class MikroMcpConfigStore:
             "token": "stdio-only-no-bearer-token",
             "role": "operator",
             "allowedRouters": sorted(routers),
-            "allowedToolPatterns": [
-                "list_*",
-                "get_*",
-                "check_router_health",
-                "ping",
-                "traceroute",
-            ],
+            "allowedToolPatterns": list(self.OPERATOR_TOOL_PATTERNS),
         }
         self._write_yaml(self.paths.identities, {"identities": identities})
 
@@ -112,6 +118,21 @@ class MikroMcpConfigStore:
         )
         self._write_dotenv(env)
         return env
+
+    def _ensure_operator_policy(self) -> None:
+        """Migrate an existing local identity to the reviewed runbook allowlist."""
+
+        if not self.paths.identities.exists():
+            return
+        identities = self._load_yaml(self.paths.identities, "identities")
+        operator = identities.get(self.OPERATOR_ID)
+        if not isinstance(operator, dict):
+            return
+        expected = list(self.OPERATOR_TOOL_PATTERNS)
+        if operator.get("allowedToolPatterns") == expected:
+            return
+        operator["allowedToolPatterns"] = expected
+        self._write_yaml(self.paths.identities, {"identities": identities})
 
     def _load_dotenv(self) -> dict[str, str]:
         if not self.paths.dotenv.exists():

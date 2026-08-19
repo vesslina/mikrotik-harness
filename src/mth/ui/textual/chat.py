@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Input, Label, OptionList, RichLog, Select, Static
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, RichLog, Select, Static
 from textual.widgets.option_list import Option
 
 from mth import __version__
@@ -28,6 +28,7 @@ from mth.agent import (
     ProviderKind,
     ProviderPreset,
     ProviderPresetStore,
+    ProviderWarmup,
     ReadOnlyAgentLoop,
     ReasoningControl,
     ReasoningStatus,
@@ -38,6 +39,16 @@ from mth.agent import (
 )
 from mth.core.mcp_client import MikroMcpClient
 from mth.core.registration import MikroMcpConfigStore, RegistrationResult
+from mth.core.runbooks import (
+    PppoeApplyResult,
+    PppoePlan,
+    PppoeRequest,
+    PppoeRollbackPreview,
+    PppoeRollbackResult,
+    PppoeRunbookError,
+    PppoeRunbookExecutor,
+    PppoeSecret,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +69,37 @@ class AgentRunner(Protocol):
 AgentFactory = Callable[[ProviderPreset, str | None], AgentRunner]
 
 
+class PppoeRunner(Protocol):
+    async def plan(self, request: PppoeRequest) -> PppoePlan: ...
+
+    async def apply_approved(
+        self,
+        plan: PppoePlan,
+        secret: PppoeSecret,
+    ) -> PppoeApplyResult: ...
+
+    async def preview_rollback(self, journal_id: str) -> PppoeRollbackPreview: ...
+
+    async def rollback_approved(
+        self,
+        journal_id: str,
+        request: PppoeRequest,
+    ) -> PppoeRollbackResult: ...
+
+
+PppoeFactory = Callable[[], PppoeRunner]
+
+
 @dataclass(frozen=True, slots=True)
 class ModelSelection:
     preset: ProviderPreset
     api_key: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PppoeSelection:
+    request: PppoeRequest
+    secret: PppoeSecret = field(repr=False)
 
 
 class PixelLogo(Static):
@@ -93,6 +131,7 @@ class PixelLogo(Static):
         output = Text()
         for line in self._word("MIKROTIK"):
             output.append(line + "\n", style="bold white on #090909")
+        output.append("\n", style="on #090909")
         for index, line in enumerate(self._word("HARNESS")):
             suffix = "\n" if index < 4 else ""
             output.append(line + suffix, style="bold #ff3b30 on #090909")
@@ -309,12 +348,115 @@ class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
         self.dismiss(None)
 
 
+class PppoeWizardScreen(ModalScreen[PppoeSelection | None]):
+    CSS = """
+    PppoeWizardScreen { align: center middle; }
+    #pppoe-dialog {
+        width: 78;
+        height: auto;
+        padding: 1 2;
+        border: round #ff3b30;
+        background: #111315;
+    }
+    #pppoe-dialog .pppoe-row { height: 3; }
+    #pppoe-dialog .field-label { width: 22; content-align: left middle; color: #aeb4ba; }
+    #pppoe-dialog Input { width: 1fr; }
+    #pppoe-options { height: 3; }
+    #pppoe-options Checkbox { width: 1fr; }
+    #pppoe-error { height: auto; min-height: 1; color: #ff6b62; }
+    #pppoe-actions { height: auto; margin-top: 1; align-horizontal: right; }
+    #pppoe-actions Button { margin-left: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pppoe-dialog"):
+            yield Static("WAN PPPoE runbook", classes="dialog-title")
+            yield Static(
+                "The password stays in this masked form and is never sent to the LLM.",
+                markup=False,
+            )
+            for label, widget in (
+                ("Client name", Input(value="pppoe-wan", id="pppoe-name")),
+                ("Parent interface", Input(value="ether1", id="pppoe-interface")),
+                ("ISP username", Input(id="pppoe-username")),
+                ("ISP password", Input(password=True, id="pppoe-password")),
+                ("Service name", Input(placeholder="optional", id="pppoe-service")),
+            ):
+                with Horizontal(classes="pppoe-row"):
+                    yield Label(label, classes="field-label")
+                    yield widget
+            with Horizontal(id="pppoe-options"):
+                yield Checkbox("Add default route", value=True, id="pppoe-default-route")
+                yield Checkbox("Dial on demand", value=False, id="pppoe-dial-demand")
+            yield Static("", id="pppoe-error", markup=False)
+            with Horizontal(id="pppoe-actions"):
+                yield Button("Cancel", id="cancel-pppoe")
+                yield Button("Build dry-run plan", id="plan-pppoe", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-pppoe":
+            self.dismiss(None)
+            return
+        if event.button.id != "plan-pppoe":
+            return
+        try:
+            request = PppoeRequest(
+                name=self.query_one("#pppoe-name", Input).value.strip(),
+                interface=self.query_one("#pppoe-interface", Input).value.strip(),
+                username=self.query_one("#pppoe-username", Input).value.strip(),
+                service_name=self.query_one("#pppoe-service", Input).value.strip() or None,
+                add_default_route=self.query_one("#pppoe-default-route", Checkbox).value,
+                dial_on_demand=self.query_one("#pppoe-dial-demand", Checkbox).value,
+            )
+            secret = PppoeSecret(self.query_one("#pppoe-password", Input).value)
+        except ValueError as error:
+            self.query_one("#pppoe-error", Static).update(str(error))
+            return
+        self.dismiss(PppoeSelection(request, secret))
+
+
+class ApprovalScreen(ModalScreen[bool]):
+    CSS = """
+    ApprovalScreen { align: center middle; }
+    #approval-dialog {
+        width: 82;
+        height: auto;
+        max-height: 28;
+        padding: 1 2;
+        border: double #ffb454;
+        background: #111315;
+    }
+    #approval-title { height: 2; color: #ffb454; text-style: bold; }
+    #approval-summary { height: auto; max-height: 18; color: white; }
+    #approval-actions { height: auto; margin-top: 1; align-horizontal: right; }
+    #approval-actions Button { margin-left: 1; }
+    """
+
+    def __init__(self, summary: str, *, action_label: str = "Apply approved plan") -> None:
+        super().__init__()
+        self._summary = summary
+        self._action_label = action_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval-dialog"):
+            yield Static("Approve RouterOS change", id="approval-title")
+            yield Static(self._summary, id="approval-summary", markup=False)
+            with Horizontal(id="approval-actions"):
+                yield Button("Cancel", id="cancel-approval")
+                yield Button(self._action_label, id="approve-plan", variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "approve-plan")
+
+
 class ChatScreen(Screen[None]):
     SLASH_COMMANDS = (
         ("/help", "show commands"),
         ("/info", "router and session info"),
         ("/model", "add or edit a model"),
         ("/models", "choose a saved model"),
+        ("/pppoe", "configure WAN PPPoE safely"),
+        ("/rollback", "rollback a runbook journal"),
         ("/log", "session log info"),
         ("/clear", "clear transcript"),
         ("/exit", "return to discovery"),
@@ -328,13 +470,13 @@ class ChatScreen(Screen[None]):
     CSS = """
     ChatScreen { background: #090909; color: #e7e7e7; }
     #chat-header {
-        height: 13;
+        height: 14;
         padding: 1 2;
         background: #090909;
         border-bottom: solid #5b6268;
     }
-    #brand { width: 46; min-width: 46; height: 11; background: #090909; }
-    #device-info { width: 1fr; height: 11; padding-left: 2; color: #9aa2aa; }
+    #brand { width: 46; min-width: 46; height: 12; background: #090909; }
+    #device-info { width: 1fr; height: 12; padding-left: 2; color: #9aa2aa; }
     #transcript { height: 1fr; padding: 1 3; background: #090909; scrollbar-color: #5b6268; }
     #composer {
         height: 3;
@@ -364,16 +506,21 @@ class ChatScreen(Screen[None]):
         *,
         preset_store: ProviderPresetStore | None = None,
         agent_factory: AgentFactory | None = None,
+        pppoe_factory: PppoeFactory | None = None,
     ) -> None:
         super().__init__()
         self.profile = profile
         self.registration = registration
         self._preset_store = preset_store or ProviderPresetStore()
         self._agent_factory = agent_factory or self._default_agent_factory
+        self._pppoe_factory = pppoe_factory or self._default_pppoe_factory
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
         self._mode = AgentMode.PLAN
         self._session_api_keys: dict[str, str] = {}
+        self._pending_pppoe: tuple[PppoeRunner, PppoePlan, PppoeSecret] | None = None
+        self._pppoe_journals: dict[str, PppoeRequest] = {}
+        self._pending_rollback: tuple[PppoeRunner, str, PppoeRequest] | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -441,8 +588,9 @@ class ChatScreen(Screen[None]):
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /model  /models [name]  /log  /clear  /exit\n"
-                "Tab cycles PLAN and read-only READY mode."
+                "/help  /info  /model  /models [name]  /pppoe  /rollback [journal]  "
+                "/log  /clear  /exit\n"
+                "Tab cycles PLAN and READY. Writes are available only through approved runbooks."
             )
         elif command == "/info":
             self._write_system(self._info_text())
@@ -450,6 +598,16 @@ class ChatScreen(Screen[None]):
             self.app.push_screen(ModelWizardScreen(), self._model_selected)
         elif command == "/models":
             self._show_models(argument.strip())
+        elif command == "/pppoe":
+            if self._mode is not AgentMode.READY:
+                self._write_system(
+                    "WAN PPPoE is an approved runbook. Press Tab to enter READY first.",
+                    error=True,
+                )
+            else:
+                self.app.push_screen(PppoeWizardScreen(), self._pppoe_selected)
+        elif command == "/rollback":
+            self._start_rollback(argument.strip())
         elif command == "/log":
             self._write_system(
                 "Session transcript is already displayed above; backend audit is local."
@@ -514,6 +672,9 @@ class ChatScreen(Screen[None]):
         self._agent = agent
         self._refresh_header()
         self._write_system(f"Model selected: {preset.model} via {preset.provider}.")
+        warm_up = getattr(agent, "warm_up", None)
+        if callable(warm_up):
+            self._warm_up_model()
 
     def _default_agent_factory(
         self,
@@ -535,6 +696,179 @@ class ChatScreen(Screen[None]):
             backend=backend,
             router_id=self.profile.router_id,
         )
+
+    def _default_pppoe_factory(self) -> PppoeRunner:
+        store = MikroMcpConfigStore()
+        backend = MikroMcpClient(environment=store.runtime_environment())
+        return PppoeRunbookExecutor(backend, self.profile.router_id)
+
+    @work(exclusive=True, group="warmup", exit_on_error=False)
+    async def _warm_up_model(self) -> None:
+        agent = self._agent
+        if agent is None:
+            return
+        warm_up = getattr(agent, "warm_up", None)
+        if not callable(warm_up):
+            return
+        self._write_system("Warming up the selected model…")
+        try:
+            result = await warm_up()
+        except ProviderError as error:
+            self._write_system(f"Warm-up failed — {error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"Warm-up failed: {error}", error=True)
+        else:
+            if isinstance(result, ProviderWarmup):
+                self._write_system(f"Model ready · warm-up {result.latency_ms} ms.")
+            else:
+                self._write_system("Model ready.")
+
+    def _pppoe_selected(self, selection: PppoeSelection | None) -> None:
+        if selection is None:
+            return
+        self._plan_pppoe(selection)
+
+    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    async def _plan_pppoe(self, selection: PppoeSelection) -> None:
+        self.query_one("#chat-input", Input).disabled = True
+        self.query_one("#mode-line", Static).update("◌ Building WAN PPPoE dry-run plan…")
+        try:
+            runner = self._pppoe_factory()
+            plan = await runner.plan(selection.request)
+        except PppoeRunbookError as error:
+            self._write_system(f"{error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"PPPoE planning failed: {error}", error=True)
+        else:
+            self._pending_pppoe = (runner, plan, selection.secret)
+            self._write_system(f"WAN PPPoE dry-run complete:\n{plan.preview}")
+            self.app.push_screen(
+                ApprovalScreen(
+                    f"Plan ID: {plan.plan_id}\n\n{plan.summary}\n\n"
+                    "Applying creates a RouterOS interface. A snapshot and audit entry "
+                    "will be written before the change."
+                ),
+                self._pppoe_approved,
+            )
+        finally:
+            input_widget = self.query_one("#chat-input", Input)
+            input_widget.disabled = False
+            self._refresh_mode()
+
+    def _pppoe_approved(self, approved: bool | None) -> None:
+        pending = self._pending_pppoe
+        if pending is None:
+            return
+        if not approved:
+            self._pending_pppoe = None
+            self._write_system("WAN PPPoE plan cancelled; no changes were made.")
+            return
+        self._apply_pppoe(*pending)
+
+    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    async def _apply_pppoe(
+        self,
+        runner: PppoeRunner,
+        plan: PppoePlan,
+        secret: PppoeSecret,
+    ) -> None:
+        self.query_one("#chat-input", Input).disabled = True
+        self.query_one("#mode-line", Static).update("⏺ Applying approved WAN PPPoE plan…")
+        try:
+            result = await runner.apply_approved(plan, secret)
+        except PppoeRunbookError as error:
+            self._write_system(f"{error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"PPPoE apply failed: {error}", error=True)
+        else:
+            journals = ", ".join(result.journal_ids) or "not returned"
+            for journal_id in result.journal_ids:
+                self._pppoe_journals[journal_id] = plan.request
+            outcome = "applied and verified" if result.verified else "applied; verification failed"
+            message = f"WAN PPPoE {outcome}.\n{result.verification_details}\n"
+            message += f"Rollback journal: {journals}\n"
+            if result.journal_ids:
+                message += f"Use /rollback {result.journal_ids[0]} to undo this change."
+            self._write_system(message, error=not result.verified)
+        finally:
+            self._pending_pppoe = None
+            input_widget = self.query_one("#chat-input", Input)
+            input_widget.disabled = False
+            input_widget.focus()
+            self._refresh_mode()
+
+    def _start_rollback(self, journal_id: str) -> None:
+        if self._mode is not AgentMode.READY:
+            self._write_system("Press Tab to enter READY before rollback.", error=True)
+            return
+        if not journal_id and self._pppoe_journals:
+            journal_id = next(reversed(self._pppoe_journals))
+        request = self._pppoe_journals.get(journal_id)
+        if request is None:
+            self._write_system(
+                "Unknown PPPoE journal for this session. Use the journal ID shown after apply.",
+                error=True,
+            )
+            return
+        self._preview_rollback(self._pppoe_factory(), journal_id, request)
+
+    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    async def _preview_rollback(
+        self,
+        runner: PppoeRunner,
+        journal_id: str,
+        request: PppoeRequest,
+    ) -> None:
+        self.query_one("#mode-line", Static).update("◌ Building rollback preview…")
+        try:
+            preview = await runner.preview_rollback(journal_id)
+        except PppoeRunbookError as error:
+            self._write_system(f"{error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"Rollback preview failed: {error}", error=True)
+        else:
+            self._pending_rollback = (runner, journal_id, request)
+            self.app.push_screen(
+                ApprovalScreen(
+                    f"Rollback journal: {journal_id}\n\n{preview.preview}\n\n"
+                    "Rollback restores the saved PPPoE configuration snapshot.",
+                    action_label="Rollback this change",
+                ),
+                self._rollback_approved,
+            )
+        finally:
+            self._refresh_mode()
+
+    def _rollback_approved(self, approved: bool | None) -> None:
+        pending = self._pending_rollback
+        if pending is None:
+            return
+        if not approved:
+            self._pending_rollback = None
+            self._write_system("Rollback cancelled; the applied change was kept.")
+            return
+        self._apply_rollback(*pending)
+
+    @work(exclusive=True, group="pppoe", exit_on_error=False)
+    async def _apply_rollback(
+        self,
+        runner: PppoeRunner,
+        journal_id: str,
+        request: PppoeRequest,
+    ) -> None:
+        self.query_one("#mode-line", Static).update("⏺ Applying approved rollback…")
+        try:
+            result = await runner.rollback_approved(journal_id, request)
+        except PppoeRunbookError as error:
+            self._write_system(f"{error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"Rollback failed: {error}", error=True)
+        else:
+            self._pppoe_journals.pop(journal_id, None)
+            self._write_system(f"Rollback applied and verified.\n{result.verification_details}")
+        finally:
+            self._pending_rollback = None
+            self._refresh_mode()
 
     def _submit_prompt(self, prompt: str) -> None:
         self.query_one("#transcript", RichLog).write(Text(f"❯ {prompt}", style="bold white"))
@@ -607,7 +941,7 @@ class ChatScreen(Screen[None]):
         )
 
     def _refresh_mode(self) -> None:
-        label = "PLAN" if self._mode is AgentMode.PLAN else "READY · read-only tools"
+        label = "PLAN" if self._mode is AgentMode.PLAN else "READY · reads + approved runbooks"
         self.query_one("#mode-line", Static).update(f"▮▮ {label}  (Tab to cycle)")
 
     @classmethod

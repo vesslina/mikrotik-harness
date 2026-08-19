@@ -21,7 +21,7 @@ from mth.agent.events import (
     ToolResult,
     VerificationResult,
 )
-from mth.agent.loop import AgentMode, ReadOnlyAgentLoop
+from mth.agent.loop import AgentMode, ProviderWarmup, ReadOnlyAgentLoop
 from mth.agent.presets import PresetPaths, ProviderPresetStore
 from mth.agent.providers import (
     ChatProvider,
@@ -51,6 +51,7 @@ __all__ = [
     "ProviderPresetStore",
     "ProviderReply",
     "ProviderToolCall",
+    "ProviderWarmup",
     "ChatProvider",
     "ReadOnlyAgentLoop",
     "ReasoningStatus",

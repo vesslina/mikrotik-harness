@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, cast
 
@@ -20,13 +22,25 @@ from mth.agent.events import (
     ToolCall,
     ToolResult,
 )
-from mth.agent.providers import ChatProvider, ProviderReply, ProviderToolCall
+from mth.agent.providers import (
+    ChatProvider,
+    ProviderError,
+    ProviderErrorCode,
+    ProviderReply,
+    ProviderToolCall,
+)
 from mth.core.mcp_client.models import McpTool, McpToolResult
 
 
 class AgentMode(StrEnum):
     PLAN = "plan"
     READY = "ready"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderWarmup:
+    latency_ms: int
+    response: str
 
 
 class ToolBackend(Protocol):
@@ -59,6 +73,28 @@ class ReadOnlyAgentLoop:
         self._provider = provider
         self._backend = backend
         self._router_id = router_id
+
+    async def warm_up(self) -> ProviderWarmup:
+        started = time.perf_counter()
+        reply = await self._provider.complete(
+            (
+                {
+                    "role": "system",
+                    "content": "Warm-up probe. Do not use tools. Reply with only OK.",
+                },
+                {"role": "user", "content": "Are you there? Reply only OK."},
+            )
+        )
+        text = reply.content.strip() or self._recover_final_answer(reply.reasoning)
+        if not text:
+            raise ProviderError(
+                ProviderErrorCode.INVALID_RESPONSE,
+                "The provider connected but the selected model returned no warm-up answer.",
+            )
+        return ProviderWarmup(
+            latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
+            response=text,
+        )
 
     async def run(self, prompt: str, mode: AgentMode) -> tuple[AgentEvent, ...]:
         catalog = await self._backend.list_tools()

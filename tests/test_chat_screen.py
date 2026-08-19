@@ -17,12 +17,20 @@ from mth.agent import (
     ToolCallFormat,
 )
 from mth.core.registration import RegistrationResult
+from mth.core.runbooks import (
+    PppoeApplyResult,
+    PppoePlan,
+    PppoeRollbackPreview,
+    PppoeRollbackResult,
+)
 from mth.ui.textual.chat import (
+    ApprovalScreen,
     ChatProfile,
     ChatScreen,
     ModelPickerScreen,
     ModelWizardScreen,
     PixelLogo,
+    PppoeWizardScreen,
 )
 
 
@@ -76,6 +84,33 @@ class _Runner:
             AgentMessage("ether1 is running."),
             FinalSummary("ether1 is running.", FinalOutcome.COMPLETED),
         )
+
+
+class _PppoeRunner:
+    def __init__(self) -> None:
+        self.request = None
+        self.applied_password = None
+        self.rollback_journal = None
+
+    async def plan(self, request):
+        self.request = request
+        return PppoePlan("plan-1", request, "Dry run: would create pppoe-wan")
+
+    async def apply_approved(self, plan, secret):
+        self.applied_password = secret.password
+        return PppoeApplyResult(
+            journal_ids=("journal-1",),
+            verified=True,
+            verification_details="PPPoE client exists.",
+            backend_summary="Applied.",
+        )
+
+    async def preview_rollback(self, journal_id):
+        return PppoeRollbackPreview(journal_id, "Would remove pppoe-wan")
+
+    async def rollback_approved(self, journal_id, request):
+        self.rollback_journal = journal_id
+        return PppoeRollbackResult(True, "PPPoE client is absent.", "Rolled back.")
 
 
 class _ChatApp(App[None]):
@@ -160,7 +195,8 @@ def test_model_command_opens_wizard(tmp_path) -> None:
 def test_pixel_logo_has_two_five_row_words() -> None:
     rendered = PixelLogo().render()
 
-    assert rendered.plain.count("\n") == 9
+    assert rendered.plain.count("\n") == 10
+    assert "\n\n" in rendered.plain
     assert "█" in rendered.plain
     assert max(len(line) for line in rendered.plain.splitlines()) <= 46
     assert any("ff3b30" in str(span.style) for span in rendered.spans)
@@ -235,5 +271,62 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
                 screen.query_one("#device-info", Static).content
             )
             assert store.selected() == second
+
+    asyncio.run(scenario())
+
+
+def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_path) -> None:
+    async def scenario() -> None:
+        pppoe = _PppoeRunner()
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
+            agent_factory=lambda _preset, _key: _Runner(),
+            pppoe_factory=lambda: pppoe,
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 45)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/pppoe"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ChatScreen)
+
+            await pilot.press("tab")
+            prompt.value = "/pppoe"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, PppoeWizardScreen)
+            wizard = app.screen
+            wizard.query_one("#pppoe-username", Input).value = "isp-user"
+            wizard.query_one("#pppoe-password", Input).value = "isp-secret"
+            await pilot.click("#plan-pppoe")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert isinstance(app.screen, ApprovalScreen)
+            approval = app.screen
+            summary = str(approval.query_one("#approval-summary", Static).content)
+            assert "isp-secret" not in summary
+            await pilot.click("#approve-plan")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert isinstance(app.screen, ChatScreen)
+            assert pppoe.applied_password == "isp-secret"
+            prompt.value = "/rollback journal-1"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(app.screen, ApprovalScreen)
+            await pilot.click("#approve-plan")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert isinstance(app.screen, ChatScreen)
+            assert pppoe.rollback_journal == "journal-1"
 
     asyncio.run(scenario())

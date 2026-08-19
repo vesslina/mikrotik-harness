@@ -12,6 +12,7 @@ from mth.agent import (
     ProviderPreset,
     ProviderReply,
     ProviderToolCall,
+    ProviderWarmup,
     ReadOnlyAgentLoop,
     ReasoningControl,
     ReasoningStatus,
@@ -124,6 +125,30 @@ def test_plan_mode_exposes_no_tools() -> None:
 
         assert isinstance(events[0], AgentMessage)
         assert backend.arguments is None
+
+    asyncio.run(scenario())
+
+
+def test_provider_warmup_uses_hidden_tool_free_probe() -> None:
+    async def scenario() -> None:
+        class Provider:
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                assert not tools
+                assert messages[-1]["content"] == "Are you there? Reply only OK."
+                return ProviderReply("OK", ())
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+        )
+
+        result = await loop.warm_up()
+
+        assert isinstance(result, ProviderWarmup)
+        assert result.response == "OK"
+        assert result.latency_ms >= 0
 
     asyncio.run(scenario())
 

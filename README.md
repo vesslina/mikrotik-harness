@@ -1,9 +1,9 @@
 # MikroTik Harness
 
 `mth` is a safety-oriented harness for managing RouterOS through a pinned MikroMCP backend.
-It completes Block A and now includes a working read-only Block B chat slice: MNDP discovery,
-TLS trust-on-first-use, backend registration, health verification, model presets, an
-OpenAI-compatible provider client, and a dynamic MCP tool loop.
+It completes Block A and now includes the first write-capable Block B runbook: MNDP discovery,
+TLS trust-on-first-use, backend registration, model presets, a dynamic read-only MCP agent, and
+an approval-bound WAN PPPoE workflow with verification and rollback.
 
 ## Development setup
 
@@ -81,17 +81,25 @@ visible throughout the session.
 - `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
 - `/models` opens a keyboard-driven picker for every saved preset; `/models <name>` remains a
   direct activation shortcut.
-- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the initial command surface.
+- `/pppoe` opens the masked WAN PPPoE wizard in READY mode. It builds a live dry-run plan,
+  requires an explicit human approval, applies through MikroMCP, and verifies the resulting
+  interface.
+- `/rollback [journal-id]` previews and confirms rollback of a PPPoE change created in the
+  current session; omitting the ID selects the most recent eligible change.
+- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
-- `Tab` cycles between `PLAN` and `READY`. PLAN exposes no tools; READY exposes read-only tools
-  bound to the connected router only. Write tools, fleet-global tools, `apply_plan`, and
-  `run_command` are excluded from this slice.
+- `Tab` cycles between `PLAN` and `READY`. PLAN exposes no tools. Normal READY chat exposes only
+  read-only, router-bound tools; writes are reachable only through reviewed deterministic
+  runbooks and their approval UI. Fleet-global tools and `run_command` remain excluded.
 
 An API key entered in `/model` remains in process memory only. Presets under
 `.mth/providers.json` store endpoint/model/capability metadata and optionally an environment
 variable name, never the key value itself. The VS Code setting `python.terminal.useEnvFile` is
 not required by `mth`; RouterOS credentials are passed directly to the pinned child process.
+
+Selecting a model triggers a hidden tool-free warm-up probe. Success reports latency; connection,
+authentication, model-name, and malformed-response failures retain distinct error codes.
 
 LM Studio reasoning models may return a non-standard `reasoning_content` field while leaving the
 OpenAI-compatible `message.content` empty. The harness recognizes both `reasoning_content` and

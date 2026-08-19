@@ -74,7 +74,7 @@ The provider-neutral foundation now includes:
 - normalized typed events for agent messages, plans, tool calls/results, approvals,
   verification, and final summaries.
 
-## Implemented read-only chat slice
+## Implemented agent chat slice
 
 The first end-to-end agent path is now operational:
 
@@ -90,20 +90,47 @@ The first end-to-end agent path is now operational:
    `MikroMcpClient`, normalized into agent events, and rendered in the transcript;
 7. LM Studio `reasoning_content` is normalized into a compact reasoning-status event, while only
    a clearly labelled misplaced final answer is recovered as visible assistant text.
+8. model selection starts a hidden, tool-free warm-up and reports typed provider failures rather
+   than a generic connection error.
 
-This is intentionally not a write-capable "ready" mode. The backend RBAC allowlist and the
-agent-side catalog filter both exclude management tools, `apply_plan`, and `run_command`.
-Router output is explicitly identified as untrusted data in the system prompt.
+Normal READY chat remains read-only. The agent-side catalog filter excludes management tools,
+`apply_plan`, and `run_command`; Router output is explicitly identified as untrusted data in the
+system prompt. Write capability is exposed only through reviewed deterministic runbooks.
+
+## Implemented WAN PPPoE runbook
+
+The first state-changing vertical slice is available through `/pppoe` in READY mode:
+
+1. a masked Textual wizard gathers the parent interface, ISP username, PPPoE password, service
+   name, default-route choice, and dial-on-demand choice;
+2. the password is held separately from the immutable plan request and is omitted from
+   `plan_changes`, the LLM context, the transcript, and the human-readable plan;
+3. `plan_changes` previews one hardcoded `manage_pppoe_client` step against live state;
+4. a human must approve the exact immutable plan in a modal before apply begins;
+5. the harness requests MikroMCP's `CONFIRMATION_REQUIRED` challenge and fails closed if the
+   configured operator identity does not produce one;
+6. token issuance, `apply_plan`, and `list_pppoe_clients` verification run in one persistent MCP
+   child session so MikroMCP's process-local single-use token protection remains effective;
+7. the returned per-step journal ID enables `/rollback`, which has its own preview, human
+   approval, confirmation challenge, execution, and absence post-check.
+
+If apply succeeds but the mandatory post-check fails, the outcome is reported as unverified and
+the journal ID is deliberately retained so the operator can still choose rollback.
+
+The operator RBAC allowlist now includes only the generic change-management meta-tools and the
+reviewed PPPoE write tool in addition to the previous read operations. Although MikroMCP's
+`apply_plan` can dispatch nested tools internally, no model receives that tool and the harness
+constructs its step list deterministically.
 
 ## Next Block B slices
 
-1. Add provider warm-up/error diagnostics and optional streaming without changing normalized
-   event contracts.
-2. Implement the WAN PPPoE runbook as the first write path: parameter collection,
-   `plan_changes`, human approval, `apply_plan`, mandatory post-check, and rollback choice.
-3. Expand the operator tool allowlist only for tools required by reviewed runbooks.
-4. Add deterministic runbook-selected RAG and golden-path examples, then richer opt-in reasoning
-   summaries and other deferred UI polish.
+1. Exercise WAN PPPoE against CHR with a local PPPoE server and record the first golden path,
+   including confirmation-gate and rollback checks.
+2. Add optional provider streaming without changing normalized event contracts.
+3. Implement the second and third reviewed runbooks, expanding the operator allowlist only for
+   their exact write tools.
+4. Add deterministic runbook-selected RAG and curated golden-path examples, then richer opt-in
+   reasoning summaries and other deferred UI polish.
 
 No model receives raw RouterOS commands, device output as instructions, secret values, or a
 direct path to `apply_plan` without the harness approval state machine.

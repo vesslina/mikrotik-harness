@@ -12,8 +12,27 @@ from mth.core.mcp_client.models import BackendInspection, McpTool, McpToolResult
 from mth.core.mcp_client.runtime import MikroMcpRuntime
 
 
+class MikroMcpSession:
+    """A live MCP session used when safety state must survive several tool calls."""
+
+    def __init__(self, session: ClientSession) -> None:
+        self._session = session
+
+    async def list_tools(self) -> tuple[McpTool, ...]:
+        result = await self._session.list_tools()
+        return MikroMcpClient._normalize_tools(result.tools)
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> McpToolResult:
+        result = await self._session.call_tool(name, dict(arguments or {}))
+        return MikroMcpClient._normalize_result(result)
+
+
 class MikroMcpClient:
-    """Short-lived stdio client; every session starts the pinned child process."""
+    """Stdio client for short calls or an explicit multi-call live session."""
 
     def __init__(
         self,
@@ -47,6 +66,13 @@ class MikroMcpClient:
         async with self._session() as session:
             result = await session.list_tools()
         return self._normalize_tools(result.tools)
+
+    @asynccontextmanager
+    async def open_session(self) -> AsyncIterator[MikroMcpSession]:
+        """Keep one backend process alive across an approval-bound workflow."""
+
+        async with self._session() as session:
+            yield MikroMcpSession(session)
 
     async def inspect_router(self, router_id: str) -> BackendInspection:
         """Fetch the live catalog and the two read-only Block A/B probes in one session."""

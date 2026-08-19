@@ -97,9 +97,14 @@ class OpenAICompatibleClient:
             )
         except urllib.error.HTTPError as error:
             detail = self._http_error_detail(error)
+            lowered = detail.lower()
             if error.code in {401, 403}:
                 code = ProviderErrorCode.AUTHENTICATION_FAILED
-            elif error.code == 404:
+            elif error.code == 404 or (
+                error.code == 400
+                and "model" in lowered
+                and any(marker in lowered for marker in ("not found", "unknown", "invalid"))
+            ):
                 code = ProviderErrorCode.MODEL_NOT_FOUND
             else:
                 code = ProviderErrorCode.CONNECTION_FAILED
