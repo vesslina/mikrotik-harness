@@ -4,7 +4,7 @@ import json
 import re
 import textwrap
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, cast
@@ -61,6 +61,7 @@ class ReadOnlyAgentLoop:
     """Provider-neutral loop with read tools and harness-owned runbook proposals."""
 
     MAX_TOOL_ROUNDS = 8
+    streams_progress = True
 
     def __init__(
         self,
@@ -79,6 +80,12 @@ class ReadOnlyAgentLoop:
         self._runbooks = runbooks
         self._catalog_router = ToolCatalogRouter(runbooks)
         self._turns: list[tuple[str, str]] = []
+        self._progress_sink: Callable[[AgentEvent], None] | None = None
+
+    def set_progress_sink(self, sink: Callable[[AgentEvent], None] | None) -> None:
+        """Publish tool progress while the multi-round agent loop is still running."""
+
+        self._progress_sink = sink
 
     def clear_history(self) -> None:
         """Forget prior user/assistant turns without changing the selected model."""
@@ -181,22 +188,24 @@ class ReadOnlyAgentLoop:
                         },
                         False,
                     )
-                    events.append(
+                    self._progress(
+                        events,
                         PlannedAction(
                             summary=f"Load RouterOS capability pack(s): {domains}",
                             tool_names=(call.name,),
                             risk=RiskLevel.READ_ONLY,
-                        )
+                        ),
                     )
-                    events.append(
+                    self._progress(
+                        events,
                         ToolCall(
                             call_id=call.call_id,
                             tool_name=call.name,
                             arguments={"domains": list(selection.domains)},
                             risk=RiskLevel.READ_ONLY,
-                        )
+                        ),
                     )
-                    events.append(self._result_event(call, result))
+                    self._progress(events, self._result_event(call, result))
                     messages.append(self._tool_message(call, result))
                     tools = selection.tools
                     continue
@@ -207,20 +216,22 @@ class ReadOnlyAgentLoop:
                         runbook=definition.id,
                         parameters=cast(dict[str, JsonValue], parameters),
                     )
-                    events.append(
+                    self._progress(
+                        events,
                         PlannedAction(
                             summary=f"Prepare the human-reviewed {definition.title} runbook",
                             tool_names=(call.name,),
                             risk=RiskLevel.CHANGE,
-                        )
+                        ),
                     )
-                    events.append(
+                    self._progress(
+                        events,
                         ToolCall(
                             call_id=call.call_id,
                             tool_name=call.name,
                             arguments=proposal.parameters,
                             risk=RiskLevel.CHANGE,
-                        )
+                        ),
                     )
                     events.append(proposal)
                     events.append(
@@ -236,29 +247,36 @@ class ReadOnlyAgentLoop:
                     return tuple(events)
                 arguments = dict(call.arguments)
                 arguments["routerId"] = self._router_id
-                events.append(
+                self._progress(
+                    events,
                     PlannedAction(
                         summary=f"Read RouterOS data using {call.name}",
                         tool_names=(call.name,),
                         risk=RiskLevel.READ_ONLY,
-                    )
+                    ),
                 )
-                events.append(
+                self._progress(
+                    events,
                     ToolCall(
                         call_id=call.call_id,
                         tool_name=call.name,
                         arguments=cast(dict[str, JsonValue], arguments),
                         risk=RiskLevel.READ_ONLY,
-                    )
+                    ),
                 )
                 result = await self._backend.call_tool(call.name, arguments)
                 safe_result = self._model_safe_result(result)
-                events.append(self._result_event(call, safe_result))
+                self._progress(events, self._result_event(call, safe_result))
                 messages.append(self._tool_message(call, safe_result))
 
         summary = "Stopped after the maximum number of read-only tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
         return tuple(events)
+
+    def _progress(self, events: list[AgentEvent], event: AgentEvent) -> None:
+        events.append(event)
+        if self._progress_sink is not None:
+            self._progress_sink(event)
 
     def _remember(self, prompt: str, response: str) -> None:
         self._turns.append((prompt, response))

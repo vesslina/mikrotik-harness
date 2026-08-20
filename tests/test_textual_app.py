@@ -1,11 +1,12 @@
 import asyncio
 
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
 from mth.core.registration import PendingRegistration, RegistrationResult
-from mth.ui.textual.app import DiscoveryApp, FingerprintScreen
+from mth.ui.textual.app import DiscoveryApp
 from mth.ui.textual.chat import ChatScreen
+from mth.ui.textual.i18n import Language
 
 
 def _device() -> DeviceInfo:
@@ -27,6 +28,7 @@ def test_discovery_populates_table_and_selection() -> None:
         app = DiscoveryApp(
             discoverer=lambda **_kwargs: DiscoveryResult(devices=(device,)),
             timeout=0.1,
+            language=Language.EN,
         )
 
         async with app.run_test(size=(120, 40)) as pilot:
@@ -56,7 +58,7 @@ def test_refresh_runs_discovery_again() -> None:
             calls += 1
             return DiscoveryResult(devices=(_device(),))
 
-        app = DiscoveryApp(discoverer=discover, timeout=0.1)
+        app = DiscoveryApp(discoverer=discover, timeout=0.1, language=Language.EN)
 
         async with app.run_test(size=(120, 40)) as pilot:
             await app.workers.wait_for_complete()
@@ -72,6 +74,7 @@ def test_connect_requires_password() -> None:
         app = DiscoveryApp(
             discoverer=lambda **_kwargs: DiscoveryResult(devices=()),
             timeout=0.1,
+            language=Language.EN,
         )
 
         async with app.run_test(size=(120, 40)):
@@ -81,6 +84,30 @@ def test_connect_requires_password() -> None:
 
             status = str(app.query_one("#status", Static).content)
             assert "non-empty RouterOS password" in status
+
+    asyncio.run(scenario())
+
+
+def test_discovery_uses_russian_ui_when_selected() -> None:
+    async def scenario() -> None:
+        app = DiscoveryApp(
+            discoverer=lambda **_kwargs: DiscoveryResult(devices=()),
+            timeout=0.1,
+            language=Language.RU,
+        )
+
+        async with app.run_test(size=(120, 40)):
+            await app.workers.wait_for_complete()
+
+            assert app.sub_title == "Поиск и выбор устройства RouterOS"
+            assert str(app.query_one("#connect", Button).label) == "Подключиться"
+            assert "Устройства не найдены" in str(
+                app.query_one("#status", Static).content
+            )
+            assert (
+                str(app.query_one("#trust-fingerprint-inline", Button).label)
+                == "Доверять и подключиться"
+            )
 
     asyncio.run(scenario())
 
@@ -128,6 +155,7 @@ def test_first_connection_requires_fingerprint_confirmation() -> None:
             discoverer=lambda **_kwargs: DiscoveryResult(devices=(_device(),)),
             registrar=registrar,
             timeout=0.1,
+            language=Language.EN,
         )
 
         async with app.run_test(size=(120, 40)) as pilot:
@@ -137,9 +165,10 @@ def test_first_connection_requires_fingerprint_confirmation() -> None:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert isinstance(app.screen, FingerprintScreen)
+            assert app.query_one("#fingerprint-inline").display is True
+            assert app.query_one("#connection").display is False
             assert registrar.registered is False
-            await pilot.click("#trust-fingerprint")
+            await pilot.click("#trust-fingerprint-inline")
             await pilot.pause()
             await app.workers.wait_for_complete()
 

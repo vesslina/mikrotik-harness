@@ -4,7 +4,6 @@ from typing import Protocol
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.binding import Binding
 from textual.containers import Center, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
@@ -19,6 +18,7 @@ from mth.core.registration import (
     RegistrationService,
 )
 from mth.ui.textual.chat import ChatProfile, ChatScreen
+from mth.ui.textual.i18n import Language, UiSettingsStore, tr
 
 Discoverer = Callable[..., DiscoveryResult]
 
@@ -98,36 +98,45 @@ class DiscoveryApp(App[None]):
     """Block A terminal UI for discovery and connection target selection."""
 
     TITLE = "MikroTik Harness"
-    SUB_TITLE = "Block A — discover and select a RouterOS device"
-
-    BINDINGS = [
-        Binding("r", "refresh", "Refresh"),
-        Binding("q", "quit", "Quit"),
-    ]
+    SUB_TITLE = "Discovery and select a RouterOS device"
 
     CSS = """
     Screen {
         layout: vertical;
+        background: #090909;
+        color: #f0f0f0;
     }
+
+    Header { background: #090909; color: white; border-bottom: solid #ff3b30; }
+    Header .header--title { color: white; }
+    Header .header--subtitle { color: #aeb4ba; }
+    Footer { background: #111315; color: #aeb4ba; }
+    Footer > .footer--highlight { background: #ff3b30; color: white; }
 
     #status {
         height: 3;
         padding: 1 2;
-        background: $panel;
-        color: $text;
+        background: #111315;
+        color: #f0f0f0;
     }
 
     #devices {
         height: 1fr;
         min-height: 8;
         margin: 0 1;
-        border: round $accent;
+        border: round #ff3b30;
+        background: #090909;
+        color: white;
     }
+    DataTable > .datatable--header { background: #1b1b1b; color: white; text-style: bold; }
+    DataTable > .datatable--cursor { background: #5a1717; color: white; }
+    DataTable > .datatable--hover { background: #2b2b2b; color: white; }
 
     #connection {
         height: auto;
         padding: 1 2;
-        border-top: solid $accent;
+        border-top: solid #ff3b30;
+        background: #090909;
     }
 
     #connection-fields {
@@ -151,7 +160,26 @@ class DiscoveryApp(App[None]):
     #connect {
         width: 100%;
         margin-top: 1;
+        background: #ff3b30;
+        color: white;
+        border: none;
     }
+    #connection Input { background: #1b1b1b; color: white; border: solid #363636; }
+    #connection Input:focus { border: solid #ff3b30; }
+    #backend-status { color: #aeb4ba; }
+    #fingerprint-inline {
+        display: none;
+        height: auto;
+        padding: 1 3;
+        border-top: solid #ff3b30;
+        background: #090909;
+    }
+    #fingerprint-inline-title { height: 2; color: white; text-style: bold; }
+    #fingerprint-inline-value { height: auto; margin: 1 0; color: #ff8a73; }
+    #fingerprint-inline-help { height: 2; color: #8b949e; }
+    #fingerprint-inline-actions { height: auto; align-horizontal: right; }
+    #fingerprint-inline-actions Button { margin-left: 1; }
+    #trust-fingerprint-inline { background: #ff3b30; color: white; }
     """
 
     def __init__(
@@ -164,8 +192,15 @@ class DiscoveryApp(App[None]):
         port: int = 5678,
         active: bool = True,
         registrar: Registrar | None = None,
+        settings_store: UiSettingsStore | None = None,
+        language: Language | None = None,
     ) -> None:
         super().__init__()
+        self._settings = settings_store or UiSettingsStore()
+        self.language = language or self._settings.language()
+        self.sub_title = tr(self.language, "discovery.subtitle")
+        self.bind("r", "refresh", description=tr(self.language, "discovery.refresh"))
+        self.bind("q", "quit", description=tr(self.language, "discovery.quit"))
         self._discoverer = discoverer
         self._timeout = timeout
         self._bind_address = bind_address
@@ -176,40 +211,66 @@ class DiscoveryApp(App[None]):
         self._devices: dict[str, DeviceInfo] = {}
         self._selected_device: DeviceInfo | None = None
         self._discovery_generation = 0
+        self._pending_fingerprint: PendingRegistration | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("Ready to search for MNDP neighbors.", id="status", markup=False)
+        yield Static(tr(self.language, "discovery.ready"), id="status", markup=False)
         yield DataTable(id="devices", zebra_stripes=True)
         with Vertical(id="connection"):
             with Horizontal(id="connection-fields"):
                 with Vertical(classes="connection-field"):
-                    yield Label("Connect to")
-                    yield Input(placeholder="IP address or hostname", id="connect-to")
+                    yield Label(tr(self.language, "discovery.connect_to"))
+                    yield Input(
+                        placeholder=tr(self.language, "discovery.address"), id="connect-to"
+                    )
                 with Vertical(classes="connection-field"):
-                    yield Label("Login")
-                    yield Input(value="admin", placeholder="RouterOS login", id="login")
+                    yield Label(tr(self.language, "discovery.login"))
+                    yield Input(
+                        value="admin",
+                        placeholder=tr(self.language, "discovery.login_placeholder"),
+                        id="login",
+                    )
                 with Vertical(classes="connection-field"):
-                    yield Label("Password")
-                    yield Input(password=True, placeholder="RouterOS password", id="password")
-            yield Button("Connect", id="connect", variant="primary")
+                    yield Label(tr(self.language, "discovery.password"))
+                    yield Input(
+                        password=True,
+                        placeholder=tr(self.language, "discovery.password_placeholder"),
+                        id="password",
+                    )
+            yield Button(tr(self.language, "discovery.connect"), id="connect")
             yield Static(
-                "Backend not connected. Discovery data is untrusted.",
+                tr(self.language, "discovery.backend_idle"),
                 id="backend-status",
                 markup=False,
             )
+        with Vertical(id="fingerprint-inline"):
+            yield Static("", id="fingerprint-inline-title")
+            yield Static("", id="fingerprint-inline-body", markup=False)
+            yield Static("", id="fingerprint-inline-value", markup=False)
+            yield Static("", id="fingerprint-inline-target", markup=False)
+            with Horizontal(id="fingerprint-inline-actions"):
+                yield Button(tr(self.language, "inline.cancel"), id="reject-fingerprint-inline")
+                yield Button(tr(self.language, "discovery.trust"), id="trust-fingerprint-inline")
+            yield Static(tr(self.language, "inline.help"), id="fingerprint-inline-help")
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#devices", DataTable)
         table.cursor_type = "row"
-        table.add_columns("MAC", "IP", "Identity", "Version", "Board")
+        table.add_columns(
+            "MAC",
+            "IP",
+            "Устройство" if self.language is Language.RU else "Identity",
+            "Версия" if self.language is Language.RU else "Version",
+            "Плата" if self.language is Language.RU else "Board",
+        )
         table.focus()
         self.action_refresh()
 
     def action_refresh(self) -> None:
         self._discovery_generation += 1
-        self._set_status("Searching for MNDP neighbors…")
+        self._set_status(tr(self.language, "discovery.searching"))
         self._discover(self._discovery_generation)
 
     @work(thread=True, exclusive=True, group="discovery", exit_on_error=False)
@@ -256,19 +317,21 @@ class DiscoveryApp(App[None]):
         if result.devices:
             warning_suffix = f" {result.warnings[0]}" if result.warnings else ""
             self._set_status(
-                f"Found {len(result.devices)} device(s). Select a row or enter an address."
-                f"{warning_suffix}"
+                tr(
+                    self.language,
+                    "discovery.found",
+                    count=len(result.devices),
+                    warning=warning_suffix,
+                )
             )
             table.focus()
         else:
-            self._set_status(
-                "No devices found. Press r to retry or enter an address manually."
-            )
+            self._set_status(tr(self.language, "discovery.none"))
 
     def _show_discovery_error(self, message: str, generation: int) -> None:
         if generation != self._discovery_generation:
             return
-        self._set_status(f"Discovery error: {message}")
+        self._set_status(tr(self.language, "discovery.error", message=message))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "devices":
@@ -287,12 +350,21 @@ class DiscoveryApp(App[None]):
             self._selected_device = device
             self.query_one("#connect-to", Input).value = address
             self._set_status(
-                f"Selected {device.identity or device.mac or address} at {address}."
+                tr(
+                    self.language,
+                    "discovery.selected",
+                    identity=device.identity or device.mac or address,
+                    address=address,
+                )
             )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "connect":
             self.action_connect()
+        elif event.button.id == "trust-fingerprint-inline":
+            self._fingerprint_decided_inline(True)
+        elif event.button.id == "reject-fingerprint-inline":
+            self._fingerprint_decided_inline(False)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id in {"connect-to", "login", "password"}:
@@ -303,21 +375,21 @@ class DiscoveryApp(App[None]):
         login = self.query_one("#login", Input).value.strip()
 
         if not target:
-            self._set_status("Enter a RouterOS address or select a discovered device.")
+            self._set_status(tr(self.language, "discovery.need_address"))
             return
         if not login:
-            self._set_status("Enter a RouterOS login.")
+            self._set_status(tr(self.language, "discovery.need_login"))
             return
         password = self.query_one("#password", Input).value
         if not password:
-            self._set_status("Enter a non-empty RouterOS password.")
+            self._set_status(tr(self.language, "discovery.need_password"))
             return
 
         device = self._selected_device
         if device is not None and self._device_address(device) != target:
             device = None
         self._set_connecting(True)
-        self._set_status(f"Connecting to {target} through MikroMCP…")
+        self._set_status(tr(self.language, "discovery.connecting", target=target))
         self._prepare_registration(target, login, password, device)
 
     @work(thread=True, exclusive=True, group="registration", exit_on_error=False)
@@ -352,18 +424,38 @@ class DiscoveryApp(App[None]):
         if pending.trusted_fingerprint:
             self._verify_registration(pending)
             return
-        self._set_status("TLS fingerprint captured. Confirm it before registration.")
-        self.push_screen(
-            FingerprintScreen(pending),
-            lambda trusted: self._fingerprint_decided(pending, bool(trusted)),
+        self._set_status(tr(self.language, "discovery.fingerprint_captured"))
+        self._pending_fingerprint = pending
+        self.query_one("#connection").display = False
+        self.query_one("#fingerprint-inline").display = True
+        self.query_one("#fingerprint-inline-title", Static).update(
+            tr(self.language, "discovery.fingerprint_title")
         )
+        self.query_one("#fingerprint-inline-body", Static).update(
+            tr(self.language, "discovery.fingerprint_body")
+        )
+        self.query_one("#fingerprint-inline-value", Static).update(
+            pending.display_fingerprint
+        )
+        self.query_one("#fingerprint-inline-target", Static).update(
+            f'{tr(self.language, "discovery.target")}: {pending.host}:{pending.port}'
+        )
+        self.query_one("#trust-fingerprint-inline", Button).focus()
+
+    def _fingerprint_decided_inline(self, trusted: bool) -> None:
+        pending = self._pending_fingerprint
+        self._pending_fingerprint = None
+        self.query_one("#fingerprint-inline").display = False
+        self.query_one("#connection").display = True
+        if pending is not None:
+            self._fingerprint_decided(pending, trusted)
 
     def _fingerprint_decided(self, pending: PendingRegistration, trusted: bool) -> None:
         if not trusted:
             self._set_connecting(False)
-            self._set_status("Connection cancelled; TLS fingerprint was not trusted.")
+            self._set_status(tr(self.language, "discovery.cancelled"))
             return
-        self._set_status("Fingerprint trusted. Registering router with MikroMCP…")
+        self._set_status(tr(self.language, "discovery.registering"))
         self._verify_registration(pending)
 
     @work(thread=True, exclusive=True, group="registration", exit_on_error=False)
@@ -388,7 +480,9 @@ class DiscoveryApp(App[None]):
         pending: PendingRegistration,
     ) -> None:
         self._set_connecting(False)
-        self._set_status(f"Connected to {result.identity} via MikroMCP.")
+        self._set_status(
+            tr(self.language, "discovery.connected", identity=result.identity)
+        )
         status = result.system_status
         sections = status.get("sections", {})
         resource = sections.get("resource", {}) if isinstance(sections, dict) else {}
@@ -399,8 +493,14 @@ class DiscoveryApp(App[None]):
             else result.health.get("rosVersion", "?")
         )
         self.query_one("#backend-status", Static).update(
-            f"Router ID: {result.router_id} | RouterOS: {version} | CPU: {cpu} | "
-            f"Live MCP tools: {result.tool_count}"
+            tr(
+                self.language,
+                "discovery.backend_connected",
+                router_id=result.router_id,
+                version=version,
+                cpu=cpu,
+                tool_count=result.tool_count,
+            )
         )
         device = self._selected_device
         if device is not None and self._device_address(device) != pending.host:
@@ -414,7 +514,14 @@ class DiscoveryApp(App[None]):
             mac=device.mac if device and device.mac else "—",
             tool_count=result.tool_count,
         )
-        self.push_screen(ChatScreen(profile, result))
+        self.push_screen(
+            ChatScreen(
+                profile,
+                result,
+                settings_store=self._settings,
+                language=self.language,
+            )
+        )
 
     def _show_registration_error(self, error: RegistrationError) -> None:
         self._set_connecting(False)

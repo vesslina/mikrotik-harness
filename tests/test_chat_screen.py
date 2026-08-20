@@ -30,14 +30,11 @@ from mth.core.runbooks import (
     WanPppoeDefinition,
 )
 from mth.ui.textual.chat import (
-    ApprovalScreen,
     ChatProfile,
     ChatScreen,
-    ModelPickerScreen,
-    ModelWizardScreen,
     PixelLogo,
-    RunbookWizardScreen,
 )
+from mth.ui.textual.i18n import Language, UiSettingsPaths, UiSettingsStore
 
 
 def _preset() -> ProviderPreset:
@@ -137,12 +134,16 @@ class _ChatApp(App[None]):
         await self.push_screen(self._chat_screen)
 
 
+def _screen(*args, **kwargs) -> ChatScreen:
+    return ChatScreen(*args, language=Language.EN, **kwargs)
+
+
 def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
     async def scenario() -> None:
         store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
         store.save(_preset())
         runner = _Runner()
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=store,
@@ -179,7 +180,7 @@ def test_model_command_opens_wizard(tmp_path) -> None:
         preset_path = tmp_path / "providers.json"
         store = ProviderPresetStore(PresetPaths(file=preset_path))
         runner = _Runner()
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=store,
@@ -194,11 +195,13 @@ def test_model_command_opens_wizard(tmp_path) -> None:
             await pilot.press("enter")
             await pilot.pause()
 
-            assert isinstance(app.screen, ModelWizardScreen)
-            wizard = app.screen
-            wizard.query_one("#model-name", Input).value = "vendor/model"
-            wizard.query_one("#api-key", Input).value = "saved-api-secret"
-            await pilot.click("#save-model")
+            assert isinstance(app.screen, ChatScreen)
+            assert screen.query_one("#interaction-panel").display is True
+            assert screen.query_one("#composer-shell").display is False
+            screen.query_one("#inline-model-name", Input).value = "vendor/model"
+            screen.query_one("#inline-api-key", Input).value = "saved-api-secret"
+            screen.query_one("#inline-save-model").focus()
+            await pilot.press("enter")
             await pilot.pause()
 
             assert isinstance(app.screen, ChatScreen)
@@ -217,7 +220,7 @@ def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
         store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
         preset = _preset()
         store.save(preset, api_key="delete-me-secret")
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=store,
@@ -232,14 +235,14 @@ def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
             await pilot.press("enter")
             await pilot.pause()
 
-            assert isinstance(app.screen, ModelPickerScreen)
-            await pilot.click("#delete-saved-model")
+            assert screen.query_one("#inline-models-view").display is True
+            await pilot.click("#inline-delete-model")
             await pilot.pause()
-            assert isinstance(app.screen, ApprovalScreen)
+            assert screen.query_one("#inline-approval-view").display is True
             assert "Delete saved model" in str(
-                app.screen.query_one("#approval-title", Static).content
+                screen.query_one("#inline-approval-title", Static).content
             )
-            await pilot.click("#approve-plan")
+            await pilot.press("enter")
             await pilot.pause()
 
             assert isinstance(app.screen, ChatScreen)
@@ -255,16 +258,18 @@ def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
 def test_pixel_logo_has_two_five_row_words() -> None:
     rendered = PixelLogo().render()
 
-    assert rendered.plain.count("\n") == 10
+    assert rendered.plain.count("\n") == 12
     assert "\n\n" in rendered.plain
     assert "█" in rendered.plain
-    assert max(len(line) for line in rendered.plain.splitlines()) <= 46
+    assert "▓" in rendered.plain
+    assert max(len(line) for line in rendered.plain.splitlines()) <= 48
     assert any("ff3b30" in str(span.style) for span in rendered.spans)
+    assert any("681d1d" in str(span.style) for span in rendered.spans)
 
 
 def test_slash_command_hints_filter_and_tab_completes(tmp_path) -> None:
     async def scenario() -> None:
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
@@ -304,7 +309,7 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
         )
         store.save(first)
         store.save(second, select=False)
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=store,
@@ -319,9 +324,7 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
             await pilot.press("enter")
             await pilot.pause()
 
-            assert isinstance(app.screen, ModelPickerScreen)
-            picker = app.screen
-            option_list = picker.query_one("#saved-model-list", OptionList)
+            option_list = screen.query_one("#inline-models-list", OptionList)
             option_list.highlighted = 1
             await pilot.press("enter")
             await pilot.pause()
@@ -338,7 +341,7 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
 def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_path) -> None:
     async def scenario() -> None:
         runner = _RunbookRunner()
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
@@ -362,19 +365,28 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
             prompt.value = "/pppoe"
             await pilot.press("enter")
             await pilot.pause()
-            assert isinstance(app.screen, RunbookWizardScreen)
-            wizard = app.screen
-            wizard.query_one("#runbook-field-username", Input).value = "isp-user"
-            wizard.query_one("#runbook-field-password", Input).value = "isp-secret"
-            await pilot.click("#plan-runbook")
+            assert screen.query_one("#inline-runbook-view").display is True
+            screen.query_one("#inline-runbook-input-2", Input).value = "isp-user"
+            screen.query_one("#inline-runbook-input-3", Input).value = "isp-secret"
+            screen.query_one("#inline-plan-runbook").focus()
+            await pilot.press("enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert isinstance(app.screen, ApprovalScreen)
-            approval = app.screen
-            summary = str(approval.query_one("#approval-summary", Static).content)
+            assert screen.query_one("#inline-approval-view").display is True
+            summary = str(screen.query_one("#inline-approval-summary", Static).content)
             assert "isp-secret" not in summary
-            await pilot.click("#approve-plan")
+            await pilot.press("tab")
+            await pilot.pause()
+            assert screen.query_one("#inline-runbook-view").display is True
+            assert screen.query_one("#inline-runbook-input-2", Input).value == "isp-user"
+            assert screen.query_one("#inline-runbook-input-3", Input).value == "isp-secret"
+            screen.query_one("#inline-plan-runbook").focus()
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert screen.query_one("#inline-approval-view").display is True
+            await pilot.press("enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -384,8 +396,8 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
             await pilot.press("enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert isinstance(app.screen, ApprovalScreen)
-            await pilot.click("#approve-plan")
+            assert screen.query_one("#inline-approval-view").display is True
+            await pilot.press("enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -417,7 +429,7 @@ def test_agent_pppoe_proposal_opens_prefilled_masked_runbook(tmp_path) -> None:
 
         store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
         store.save(_preset())
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=store,
@@ -434,19 +446,19 @@ def test_agent_pppoe_proposal_opens_prefilled_masked_runbook(tmp_path) -> None:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert isinstance(app.screen, RunbookWizardScreen)
-            wizard = app.screen
-            assert wizard.query_one("#runbook-field-name", Input).value == "isp-uplink"
-            assert wizard.query_one("#runbook-field-interface", Input).value == "ether3"
-            assert wizard.query_one("#runbook-field-username", Input).value == "subscriber"
-            assert wizard.query_one("#runbook-field-password", Input).value == ""
+            assert screen.query_one("#inline-runbook-view").display is True
+            assert screen.query_one("#inline-runbook-input-0", Input).value == "isp-uplink"
+            assert screen.query_one("#inline-runbook-input-1", Input).value == "ether3"
+            assert screen.query_one("#inline-runbook-input-2", Input).value == "subscriber"
+            assert screen.query_one("#inline-runbook-input-3", Input).value == ""
+            assert screen.query_one("#inline-runbook-input-3", Input).password is True
 
     asyncio.run(scenario())
 
 
 def test_bridge_command_uses_the_generic_schema_driven_wizard(tmp_path) -> None:
     async def scenario() -> None:
-        screen = ChatScreen(
+        screen = _screen(
             _profile(),
             _registration(),
             preset_store=ProviderPresetStore(
@@ -463,11 +475,44 @@ def test_bridge_command_uses_the_generic_schema_driven_wizard(tmp_path) -> None:
             await pilot.press("enter")
             await pilot.pause()
 
-            assert isinstance(app.screen, RunbookWizardScreen)
-            wizard = app.screen
-            assert wizard.definition.id == "lan_bridge"
-            assert wizard.query_one("#runbook-field-name", Input).value == "bridge-lan"
-            assert wizard.query_one("#runbook-field-interfaces", Input).password is False
-            assert wizard.query_one("#runbook-field-comment", Input).value == "Managed by mth"
+            assert screen.query_one("#inline-runbook-view").display is True
+            assert screen.query_one("#inline-runbook-input-0", Input).value == "bridge-lan"
+            assert screen.query_one("#inline-runbook-input-1", Input).password is False
+            assert screen.query_one("#inline-runbook-input-2", Input).value == "Managed by mth"
+
+    asyncio.run(scenario())
+
+
+def test_language_command_switches_inline_and_persists(tmp_path) -> None:
+    async def scenario() -> None:
+        settings = UiSettingsStore(UiSettingsPaths(file=tmp_path / "settings.json"))
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(
+                PresetPaths(file=tmp_path / "providers.json")
+            ),
+            agent_factory=lambda _preset, _key: _Runner(),
+            settings_store=settings,
+            language=Language.EN,
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 45)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/language"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert screen.query_one("#inline-language-view").display is True
+            choices = screen.query_one("#inline-language-options", OptionList)
+            choices.highlighted = 1
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert settings.language() is Language.RU
+            assert "Спросите" in str(prompt.placeholder)
+            assert screen.query_one("#composer-shell").display is True
 
     asyncio.run(scenario())

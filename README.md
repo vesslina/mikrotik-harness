@@ -1,5 +1,7 @@
 # MikroTik Harness
 
+[Русская версия](README_RU.md)
+
 `mth` is a safety-oriented harness for managing RouterOS through a pinned MikroMCP backend.
 It completes Block A and now has a working Block B agent loop: MNDP discovery, TLS
 trust-on-first-use, backend registration, model presets, capability-routed read tools, and seven
@@ -76,11 +78,14 @@ untrusted self-announcements; only the pinned TLS connection establishes device 
 
 After a successful connection, `mth` opens a keyboard-first chat screen. Its pixel header keeps
 the connected device, RouterOS version, selected model, harness version, and live MCP tool count
-visible throughout the session.
+visible throughout the session. The two-line logo uses an offset terminal shadow inspired by the
+classic Claude Code wordmark while retaining the harness's black, white, and red identity.
 
 - `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
 - `/models` opens a keyboard-driven picker for every saved preset. The selected preset and its
   encrypted API key can be deleted there; `/models <name>` remains a direct activation shortcut.
+- `/language` opens the inline English/Russian selector; `/language en` and `/language ru` switch
+  directly. The first launch follows the operating-system locale and the choice is persisted.
 - `/pppoe`, `/bridge`, `/dhcp`, `/dns`, `/nat`, `/services`, and `/wireguard` open schema-driven
   runbook wizards in READY mode. DHCP currently creates the pool and server only after the
   operator confirms that the matching RouterOS network/gateway entry already exists.
@@ -94,6 +99,9 @@ visible throughout the session.
   clears both the visible transcript and the model's in-process conversation memory.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
+- Model setup, saved-model selection, runbook forms, deletion, apply, rollback, and language
+  selection are inline interactions: they temporarily replace the composer without covering the
+  transcript. `Esc` cancels and `Tab` returns an approval to editable parameters.
 - `Tab` cycles between `PLAN` and `READY`. PLAN does not start MikroMCP or expose tools. READY
   first exposes one local capability selector; the model then receives only the small live
   read-only domain pack relevant to the request. Writes are reachable only through reviewed
@@ -111,6 +119,13 @@ Conversation memory is bounded by the selected preset's declared context size an
 recent complete user/assistant turns. It is intentionally process-local and excludes raw hidden
 reasoning. Increasing a preset's context setting now has an actual effect; recreate an incorrectly
 sized preset after deleting it from `/models`.
+
+User prompts are rendered on a grey transcript card while model output remains on the black
+background. During a request an activity line shows a rotating status phrase and live elapsed
+time. Exact reasoning-token usage appears when the provider returns it; non-streaming compatible
+providers cannot report a trustworthy live token counter, so the active line shows an ellipsis
+instead of inventing one. Tool actions appear as they happen between model rounds; `Ctrl+O`
+expands the current turn's bound tool names and arguments.
 
 MCP tool results are recursively redacted before both the transcript event and the next LLM
 request. Credential-shaped fields such as passwords, API keys, private keys, communities, and

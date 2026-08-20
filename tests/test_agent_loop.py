@@ -106,6 +106,8 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
             backend=backend,
             router_id="mikrotik-afe23e",
         )
+        progress = []
+        loop.set_progress_sink(progress.append)
 
         events = await loop.run("Show interfaces", AgentMode.READY)
 
@@ -121,6 +123,9 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
         assert any(isinstance(event, PlannedAction) for event in events)
         assert any(isinstance(event, AgentMessage) for event in events)
         assert isinstance(events[-1], FinalSummary)
+        assert any(isinstance(event, PlannedAction) for event in progress)
+        assert any(isinstance(event, ToolResult) for event in progress)
+        assert not any(isinstance(event, AgentMessage) for event in progress)
 
     asyncio.run(scenario())
 
