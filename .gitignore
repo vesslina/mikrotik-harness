@@ -1,4 +1,5 @@
 /.venv/
+/.graphify-venv/
 /graphify-out/
 /.mypy_cache/
 /.pytest_cache/
