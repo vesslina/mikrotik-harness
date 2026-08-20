@@ -2,22 +2,25 @@
 
 ## Current state
 
-Block A is complete and the first major Block B pass is operational. A connected model can read
+Block A is complete and the second major Block B pass is operational. A connected model can read
 live RouterOS state through a bounded capability pack, explain the result, and hand a supported
-change request to one of four deterministic runbooks. The model never executes a write itself.
+change request to one of seven deterministic runbooks. The model never executes a write itself.
 
-Implemented runbooks:
+Implemented runbooks after Pass 2:
 
 | Command | Runbook | Reviewed write tools |
 | --- | --- | --- |
 | `/pppoe` | WAN PPPoE client | `manage_pppoe_client` |
 | `/bridge` | LAN bridge and member ports | `manage_bridge`, `manage_bridge_port` |
+| `/dhcp` | IP pool and DHCP server core | `manage_ip_pool`, `manage_dhcp_server` |
+| `/dns` | RouterOS DNS resolver | `manage_dns_settings` |
 | `/nat` | WAN source-NAT masquerade | `manage_firewall_rule` |
 | `/services` | Disable a lockout-safe service subset | `manage_ip_service` |
+| `/wireguard` | WireGuard interface and one peer | `manage_wireguard_interface`, `manage_wireguard_peer` |
 
-The remaining catalog from the project context is intentionally not represented as direct model
-tools. New change capability is added by registering another reviewed `RunbookDefinition`, not by
-relaxing the agent boundary.
+The rest of the context catalog is intentionally not represented as direct model tools where the
+pinned backend cannot express the complete operation safely. New change capability is added by
+registering another reviewed `RunbookDefinition`, not by relaxing the agent boundary.
 
 ## Dependency and runtime
 
@@ -101,6 +104,11 @@ apply call. They are absent from proposal schemas, dry-run steps, transcript tex
 history. This boundary is independent from the optional loopback-model setting that allows raw
 sensitive read results to enter local model context.
 
+Provider API keys use a separate encrypted vault. Current-user DPAPI is preferred on Windows; a
+private Fernet key file is the portable fallback. The ciphertext is Base64-encoded for JSON, but
+Base64 itself is not treated as encryption. Environment-variable references remain supported and
+take precedence. Deleting a preset also deletes its encrypted vault entry.
+
 RouterOS can include a `password` field in `list_pppoe_clients`. Baseline capture therefore does
 not persist arbitrary records: every runbook projects only the small allowlist of fields required
 for later verification. Arbitrary comments, scripts, credentials, and other device-controlled
@@ -108,8 +116,13 @@ fields cannot silently become durable runbook state.
 
 The stdio process always uses a named `mth-operator` identity and a persistent confirmation
 secret. Its RBAC allowlist is migrated from the registered runbook catalog and contains generic
-plan/apply/rollback meta-tools plus only the five reviewed write tools listed above. Nested
+plan/apply/rollback meta-tools plus only the reviewed write tools listed above. Nested
 `apply_plan` dispatch is checked again by the harness against the immutable definition.
+
+The model loop retains a bounded window of recent complete turns. The budget comes from the
+selected preset's context declaration with space reserved for the response. Tool traces are not
+blindly persisted as dialogue; the assistant's final summary is retained and live state must be
+read again before later changes. `/clear` clears this memory as well as the screen.
 
 ## Runbook-specific limits
 
@@ -121,18 +134,24 @@ plan/apply/rollback meta-tools plus only the five reviewed write tools listed ab
 - NAT is source masquerade only. The pinned backend's typed firewall tool does not expose the
   destination-NAT translation fields required for a safe port-forward runbook.
 - Firewall rollback restores presence and fields but cannot guarantee original rule order.
+- DHCP creates only an IP pool and server. The pinned backend has no typed DHCP network/gateway
+  mutation, so an operator-only checkbox confirms that matching state already exists.
+- WireGuard creates an interface and one peer. RouterOS generates the local private key; the
+  model and runbook never accept it as input or persist it in the baseline.
 - The services runbook can disable only `api`, `api-ssl`, `telnet`, `www`, and `ftp`. It refuses
   `www-ssl`, `ssh`, and `winbox` to protect the harness and operator management paths.
+- Wi-Fi password, baseline firewall, backup/export, and SSH port mutation remain blocked for the
+  exact reasons recorded in `docs/backend-capability-gaps.md`.
 
 ## Next Block B passes
 
-1. Add the remaining reviewed runbooks from the project catalog in coherent groups: DHCP/DNS,
-   firewall baseline, Wi-Fi, WireGuard, backup/export, and diagnostics.
+1. Resolve or upstream the typed backend gaps for DHCP network entries, Wi-Fi security profiles,
+   baseline firewall match fields, and rollback-bound backup/export.
 2. Add CHR golden tests for successful apply and rollback. PPPoE's active-session case needs a
    local PPPoE server; bridge/NAT/services should use isolated temporary objects.
 3. Add optional provider streaming without changing normalized events or safety boundaries.
-4. Add deterministic runbook-selected RAG and curated golden examples after the operational
-   catalog is complete.
+4. Add deterministic runbook-selected RAG after the operational catalog is complete. The first
+   curated model-evaluation scripts already live in `docs/model-evaluation-prompts-ru.md`.
 
 RAG remains deliberately deferred: typed live state and deterministic runbooks deliver more
 operational value now, while documentation retrieval can be added later without reopening the

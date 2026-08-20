@@ -38,7 +38,16 @@ def test_capability_packs_route_representative_live_tools_and_proposals() -> Non
     assert "propose_wan_pppoe" not in interface_names
 
     wan_names = {tool.name for tool in router.select(catalog, ["wan_vpn"]).tools}
-    assert {"propose_wan_pppoe", "propose_wan_nat"} <= wan_names
+    assert {
+        "propose_wan_pppoe",
+        "propose_wan_nat",
+        "propose_wireguard_peer",
+    } <= wan_names
+
+    addressing_names = {
+        tool.name for tool in router.select(catalog, ["addressing_services"]).tools
+    }
+    assert {"propose_lan_dhcp", "propose_dns_resolver"} <= addressing_names
 
 
 def test_capability_router_rejects_global_write_and_misannotated_tools() -> None:

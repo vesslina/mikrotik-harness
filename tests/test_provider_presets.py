@@ -6,14 +6,39 @@ from mth.agent import (
     ProviderKind,
     ProviderPreset,
     ProviderPresetStore,
+    ProviderSecretPaths,
+    ProviderSecretStore,
     ReasoningControl,
     ToolCallFormat,
 )
 
 
-def test_preset_store_never_persists_api_key_value(tmp_path) -> None:
+class _Protector:
+    name = "test-protector"
+
+    def protect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+    def unprotect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+
+def _store(tmp_path) -> ProviderPresetStore:
+    return ProviderPresetStore(
+        PresetPaths(file=tmp_path / "providers.json"),
+        ProviderSecretStore(
+            ProviderSecretPaths(
+                file=tmp_path / "provider-secrets.json",
+                key_file=tmp_path / "provider-secrets.key",
+            ),
+            protector=_Protector(),
+        ),
+    )
+
+
+def test_preset_store_encrypts_api_key_separately_and_deletes_both(tmp_path) -> None:
     path = tmp_path / "providers.json"
-    store = ProviderPresetStore(PresetPaths(file=path))
+    store = _store(tmp_path)
     preset = ProviderPreset(
         name="openrouter",
         provider=ProviderKind.OPENROUTER,
@@ -31,14 +56,24 @@ def test_preset_store_never_persists_api_key_value(tmp_path) -> None:
         ),
     )
 
-    store.save(preset)
+    store.save(preset, api_key="saved-api-secret")
 
     raw = path.read_text(encoding="utf-8")
     document = json.loads(raw)
     assert document["selected"] == "openrouter"
-    assert "memory-only-secret" not in raw
+    assert "saved-api-secret" not in raw
     assert "api_key_env" in raw
     assert store.selected() == preset
+    vault = (tmp_path / "provider-secrets.json").read_text(encoding="utf-8")
+    assert "saved-api-secret" not in vault
+    assert store.api_key(preset) == "saved-api-secret"
+    assert store.has_saved_api_key(preset) is True
+
+    store.delete(preset.name)
+
+    assert store.list() == ()
+    assert store.selected() is None
+    assert store.api_key(preset) is None
 
 
 def test_old_preset_defaults_sensitive_tool_data_to_protected(tmp_path) -> None:

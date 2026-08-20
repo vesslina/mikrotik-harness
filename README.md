@@ -2,7 +2,7 @@
 
 `mth` is a safety-oriented harness for managing RouterOS through a pinned MikroMCP backend.
 It completes Block A and now has a working Block B agent loop: MNDP discovery, TLS
-trust-on-first-use, backend registration, model presets, capability-routed read tools, and four
+trust-on-first-use, backend registration, model presets, capability-routed read tools, and seven
 approval-bound runbooks with dry-run, verification, persistent history, and rollback.
 
 ## Development setup
@@ -79,18 +79,19 @@ the connected device, RouterOS version, selected model, harness version, and liv
 visible throughout the session.
 
 - `/model` configures Local/LM Studio, OpenRouter, or a custom OpenAI-compatible endpoint.
-- `/models` opens a keyboard-driven picker for every saved preset; `/models <name>` remains a
-  direct activation shortcut.
-- `/pppoe`, `/bridge`, `/nat`, and `/services` open schema-driven runbook wizards in READY mode.
-  They cover WAN PPPoE, a LAN bridge with member ports, WAN source-NAT masquerade, and disabling
-  a lockout-safe subset of administrative services.
+- `/models` opens a keyboard-driven picker for every saved preset. The selected preset and its
+  encrypted API key can be deleted there; `/models <name>` remains a direct activation shortcut.
+- `/pppoe`, `/bridge`, `/dhcp`, `/dns`, `/nat`, `/services`, and `/wireguard` open schema-driven
+  runbook wizards in READY mode. DHCP currently creates the pool and server only after the
+  operator confirms that the matching RouterOS network/gateway entry already exists.
 - Natural-language change requests can call the matching harness-owned `propose_*` handoff.
   These calls only open an editable form; the model never receives a backend write tool and
   cannot bypass dry-run, human approval, MikroMCP confirmation, post-check, or rollback.
 - `/rollback [execution-id|journal-id]` previews and confirms rollback of the complete runbook.
   History is stored without secrets under `.mth/runbook-history.json`, so rollback still works
   after restarting `mth`. Omitting the ID selects the most recent eligible execution.
-- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface.
+- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface. `/clear`
+  clears both the visible transcript and the model's in-process conversation memory.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
 - `Tab` cycles between `PLAN` and `READY`. PLAN does not start MikroMCP or expose tools. READY
@@ -99,10 +100,17 @@ visible throughout the session.
   deterministic runbooks and their approval UI. Fleet-global tools and `run_command` remain
   excluded.
 
-An API key entered in `/model` remains in process memory only. Presets under
-`.mth/providers.json` store endpoint/model/capability metadata and optionally an environment
-variable name, never the key value itself. The VS Code setting `python.terminal.useEnvFile` is
-not required by `mth`; RouterOS credentials are passed directly to the pinned child process.
+An API key entered in `/model` is saved separately from preset metadata in the encrypted
+`.mth/provider-secrets.json` vault. Windows current-user DPAPI is preferred; if DPAPI is not
+available, a Fernet key stored in the private `.mth/provider-secrets.key` file is used. Base64 is
+only the serialization of encrypted bytes, never the encryption itself. A named environment
+variable, when configured and non-empty, overrides the saved value. Secrets are never written to
+`.mth/providers.json`, the transcript, logs, plans, or Git.
+
+Conversation memory is bounded by the selected preset's declared context size and retains only
+recent complete user/assistant turns. It is intentionally process-local and excludes raw hidden
+reasoning. Increasing a preset's context setting now has an actual effect; recreate an incorrectly
+sized preset after deleting it from `/models`.
 
 MCP tool results are recursively redacted before both the transcript event and the next LLM
 request. Credential-shaped fields such as passwords, API keys, private keys, communities, and
@@ -156,4 +164,7 @@ python -m mth --help
 ```
 
 The Block B architecture and next implementation slices are recorded in
-[`docs/block-b-architecture.md`](docs/block-b-architecture.md).
+[`docs/block-b-architecture.md`](docs/block-b-architecture.md). The exact pinned-backend limits
+are tracked in [`docs/backend-capability-gaps.md`](docs/backend-capability-gaps.md), and the
+three-level live model test suite is in
+[`docs/model-evaluation-prompts-ru.md`](docs/model-evaluation-prompts-ru.md).

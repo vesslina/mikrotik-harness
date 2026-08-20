@@ -15,6 +15,7 @@ from mth.agent.capabilities import (
     ReasoningControl,
     ToolCallFormat,
 )
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.mcp_client.runtime import project_root
 
 
@@ -24,8 +25,18 @@ class PresetPaths:
 
 
 class ProviderPresetStore:
-    def __init__(self, paths: PresetPaths | None = None) -> None:
+    def __init__(
+        self,
+        paths: PresetPaths | None = None,
+        secret_store: ProviderSecretStore | None = None,
+    ) -> None:
         self.paths = paths or PresetPaths()
+        self._secrets = secret_store or ProviderSecretStore(
+            ProviderSecretPaths(
+                file=self.paths.file.with_name("provider-secrets.json"),
+                key_file=self.paths.file.with_name("provider-secrets.key"),
+            )
+        )
 
     def list(self) -> tuple[ProviderPreset, ...]:
         document = self._load()
@@ -45,7 +56,13 @@ class ProviderPresetStore:
             return None
         return next((preset for preset in self.list() if preset.name == selected), None)
 
-    def save(self, preset: ProviderPreset, *, select: bool = True) -> None:
+    def save(
+        self,
+        preset: ProviderPreset,
+        *,
+        api_key: str | None = None,
+        select: bool = True,
+    ) -> None:
         document = self._load()
         raw_presets = document.setdefault("presets", {})
         if not isinstance(raw_presets, dict):
@@ -54,9 +71,31 @@ class ProviderPresetStore:
         if select:
             document["selected"] = preset.name
         self._atomic_write(document)
+        if api_key:
+            self._secrets.set(preset.name, api_key)
 
     def api_key(self, preset: ProviderPreset) -> str | None:
-        return os.environ.get(preset.api_key_env) if preset.api_key_env else None
+        if preset.api_key_env:
+            environment_value = os.environ.get(preset.api_key_env)
+            if environment_value:
+                return environment_value
+        return self._secrets.get(preset.name)
+
+    def has_saved_api_key(self, preset: ProviderPreset) -> bool:
+        return self._secrets.contains(preset.name)
+
+    def delete(self, preset_name: str) -> None:
+        document = self._load()
+        raw_presets = document.get("presets", {})
+        if not isinstance(raw_presets, dict):
+            raise ValueError("Invalid provider preset mapping")
+        if preset_name not in raw_presets:
+            raise KeyError(preset_name)
+        del raw_presets[preset_name]
+        if document.get("selected") == preset_name:
+            document["selected"] = next(iter(sorted(raw_presets)), None)
+        self._atomic_write(document)
+        self._secrets.delete(preset_name)
 
     def _load(self) -> dict[str, Any]:
         if not self.paths.file.exists():

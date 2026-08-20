@@ -107,6 +107,12 @@ class ModelSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPickerResult:
+    preset: ProviderPreset
+    delete: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class RunbookSelection:
     submission: RunbookSubmission = field(repr=False)
 
@@ -209,10 +215,10 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                     id="model-name",
                 )
             with Horizontal(classes="model-row"):
-                yield Label("API key (memory only)", classes="field-label")
+                yield Label("API key (encrypted)", classes="field-label")
                 yield Input(
                     password=True,
-                    placeholder="optional for local providers",
+                    placeholder="saved per preset; optional for local providers",
                     id="api-key",
                 )
             with Horizontal(classes="model-row"):
@@ -288,7 +294,7 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
         self.query_one("#model-error", Static).update(message)
 
 
-class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
+class ModelPickerScreen(ModalScreen[ModelPickerResult | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
     CSS = """
@@ -336,6 +342,7 @@ class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
             yield Static("↑/↓ choose  ·  Enter activate  ·  Esc cancel", id="model-picker-help")
             with Horizontal(id="model-picker-actions"):
                 yield Button("Cancel", id="cancel-picker")
+                yield Button("Delete selected", id="delete-saved-model", variant="error")
                 yield Button("Use model", id="use-saved-model", variant="primary")
 
     def on_mount(self) -> None:
@@ -352,16 +359,21 @@ class ModelPickerScreen(ModalScreen[ProviderPreset | None]):
         option_list.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(self._presets[event.option_index])
+        self.dismiss(ModelPickerResult(self._presets[event.option_index]))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel-picker":
             self.dismiss(None)
-        elif event.button.id == "use-saved-model":
+        elif event.button.id in {"use-saved-model", "delete-saved-model"}:
             option_list = self.query_one("#saved-model-list", OptionList)
             index = option_list.highlighted
             if index is not None:
-                self.dismiss(self._presets[index])
+                self.dismiss(
+                    ModelPickerResult(
+                        self._presets[index],
+                        delete=event.button.id == "delete-saved-model",
+                    )
+                )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -489,14 +501,21 @@ class ApprovalScreen(ModalScreen[bool]):
     #approval-actions Button { margin-left: 1; }
     """
 
-    def __init__(self, summary: str, *, action_label: str = "Apply approved plan") -> None:
+    def __init__(
+        self,
+        summary: str,
+        *,
+        title: str = "Approve RouterOS change",
+        action_label: str = "Apply approved plan",
+    ) -> None:
         super().__init__()
         self._summary = summary
+        self._title = title
         self._action_label = action_label
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-dialog"):
-            yield Static("Approve RouterOS change", id="approval-title")
+            yield Static(self._title, id="approval-title")
             yield Static(self._summary, id="approval-summary", markup=False)
             with Horizontal(id="approval-actions"):
                 yield Button("Cancel", id="cancel-approval")
@@ -514,8 +533,11 @@ class ChatScreen(Screen[None]):
         ("/models", "choose a saved model"),
         ("/pppoe", "configure WAN PPPoE safely"),
         ("/bridge", "create a LAN bridge safely"),
+        ("/dhcp", "create a DHCP pool and server safely"),
+        ("/dns", "configure DNS resolver settings safely"),
         ("/nat", "configure WAN masquerade safely"),
         ("/services", "disable unnecessary services safely"),
+        ("/wireguard", "create a WireGuard interface and peer"),
         ("/rollback", "rollback a runbook journal"),
         ("/log", "session log info"),
         ("/clear", "clear transcript"),
@@ -588,6 +610,7 @@ class ChatScreen(Screen[None]):
         self._pending_rollback: (
             tuple[RunbookRunner, RunbookExecutionRecord] | None
         ) = None
+        self._pending_model_delete: ProviderPreset | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -649,14 +672,19 @@ class ChatScreen(Screen[None]):
 
     def action_clear_chat(self) -> None:
         self.query_one("#transcript", RichLog).clear()
+        clear_history = getattr(self._agent, "clear_history", None)
+        if callable(clear_history):
+            clear_history()
+        self._write_system("Conversation and model memory cleared.")
 
     def _handle_command(self, raw: str) -> None:
         command, _, argument = raw.partition(" ")
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /model  /models [name]  /pppoe  /bridge  /nat  "
-                "/services  /rollback [execution|journal]  /log  /clear  /exit\n"
+                "/help  /info  /model  /models [name]  /pppoe  /bridge  /dhcp  /dns  "
+                "/nat  /services  /wireguard  /rollback [execution|journal]  "
+                "/log  /clear  /exit\n"
                 "Tab cycles PLAN and READY. Writes are available only through approved runbooks."
             )
         elif command == "/info":
@@ -714,11 +742,43 @@ class ChatScreen(Screen[None]):
             return
         self._activate_preset(selection.preset, selection.api_key)
 
-    def _saved_model_selected(self, preset: ProviderPreset | None) -> None:
-        if preset is None:
+    def _saved_model_selected(self, result: ModelPickerResult | None) -> None:
+        if result is None:
+            return
+        preset = result.preset
+        if result.delete:
+            self._pending_model_delete = preset
+            self.app.push_screen(
+                ApprovalScreen(
+                    f'Delete saved model preset "{preset.name}"?\n\n'
+                    "Its encrypted API key will also be permanently removed.",
+                    title="Delete saved model",
+                    action_label="Delete preset",
+                ),
+                self._model_delete_approved,
+            )
             return
         api_key = self._session_api_keys.get(preset.name) or self._preset_store.api_key(preset)
         self._activate_preset(preset, api_key)
+
+    def _model_delete_approved(self, approved: bool | None) -> None:
+        preset = self._pending_model_delete
+        self._pending_model_delete = None
+        if preset is None or not approved:
+            return
+        try:
+            self._preset_store.delete(preset.name)
+        except (KeyError, OSError, ValueError) as error:
+            self._write_system(f"Could not delete model preset: {error}", error=True)
+            return
+        self._session_api_keys.pop(preset.name, None)
+        if self._preset is not None and self._preset.name == preset.name:
+            self._preset = None
+            self._agent = None
+            self._refresh_header()
+        self._write_system(
+            f'Model preset "{preset.name}" and its saved API key were deleted.'
+        )
 
     def _activate_preset(
         self,
@@ -730,7 +790,7 @@ class ChatScreen(Screen[None]):
         try:
             agent = self._agent_factory(preset, api_key)
             if persist:
-                self._preset_store.save(preset)
+                self._preset_store.save(preset, api_key=api_key)
         except (OSError, ValueError) as error:
             self._write_system(f"Model preset failed: {error}", error=True)
             return

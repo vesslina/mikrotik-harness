@@ -78,6 +78,12 @@ class ReadOnlyAgentLoop:
         self._router_id = router_id
         self._runbooks = runbooks
         self._catalog_router = ToolCatalogRouter(runbooks)
+        self._turns: list[tuple[str, str]] = []
+
+    def clear_history(self) -> None:
+        """Forget prior user/assistant turns without changing the selected model."""
+
+        self._turns.clear()
 
     async def warm_up(self) -> ProviderWarmup:
         started = time.perf_counter()
@@ -106,8 +112,10 @@ class ReadOnlyAgentLoop:
         tools: tuple[McpTool, ...] = (
             (self._catalog_router.selector_tool,) if mode is AgentMode.READY else ()
         )
+        system_prompt = self._system_prompt(mode)
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._system_prompt(mode)},
+            {"role": "system", "content": system_prompt},
+            *self._bounded_history(system_prompt, prompt),
             {"role": "user", "content": prompt},
         ]
         events: list[AgentEvent] = []
@@ -138,6 +146,7 @@ class ReadOnlyAgentLoop:
                     )
                 events.append(AgentMessage(text))
                 events.append(FinalSummary(text, FinalOutcome.COMPLETED))
+                self._remember(prompt, text)
                 return tuple(events)
             if mode is AgentMode.PLAN:
                 events.append(
@@ -220,6 +229,10 @@ class ReadOnlyAgentLoop:
                             FinalOutcome.COMPLETED,
                         )
                     )
+                    self._remember(
+                        prompt,
+                        f"Prepared the human-reviewed {definition.title} runbook proposal.",
+                    )
                     return tuple(events)
                 arguments = dict(call.arguments)
                 arguments["routerId"] = self._router_id
@@ -246,6 +259,44 @@ class ReadOnlyAgentLoop:
         summary = "Stopped after the maximum number of read-only tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
         return tuple(events)
+
+    def _remember(self, prompt: str, response: str) -> None:
+        self._turns.append((prompt, response))
+        if len(self._turns) > 100:
+            del self._turns[:-100]
+
+    def _bounded_history(
+        self,
+        system_prompt: str,
+        current_prompt: str,
+    ) -> list[dict[str, str]]:
+        """Keep recent complete turns inside the declared model context budget."""
+
+        max_tokens = self.preset.capabilities.max_context_tokens
+        response_reserve = min(4096, max(512, max_tokens // 4))
+        available_chars = max(
+            0,
+            (max_tokens - response_reserve) * 4
+            - len(system_prompt)
+            - len(current_prompt),
+        )
+        selected: list[tuple[str, str]] = []
+        used = 0
+        for user_text, assistant_text in reversed(self._turns):
+            size = len(user_text) + len(assistant_text) + 32
+            if used + size > available_chars:
+                break
+            selected.append((user_text, assistant_text))
+            used += size
+        messages: list[dict[str, str]] = []
+        for user_text, assistant_text in reversed(selected):
+            messages.extend(
+                (
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": assistant_text},
+                )
+            )
+        return messages
 
     @staticmethod
     def _recover_final_answer(reasoning: str) -> str:

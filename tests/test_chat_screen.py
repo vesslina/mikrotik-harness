@@ -177,11 +177,12 @@ def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
 def test_model_command_opens_wizard(tmp_path) -> None:
     async def scenario() -> None:
         preset_path = tmp_path / "providers.json"
+        store = ProviderPresetStore(PresetPaths(file=preset_path))
         runner = _Runner()
         screen = ChatScreen(
             _profile(),
             _registration(),
-            preset_store=ProviderPresetStore(PresetPaths(file=preset_path)),
+            preset_store=store,
             agent_factory=lambda _preset, _key: runner,
         )
         app = _ChatApp(screen)
@@ -196,13 +197,57 @@ def test_model_command_opens_wizard(tmp_path) -> None:
             assert isinstance(app.screen, ModelWizardScreen)
             wizard = app.screen
             wizard.query_one("#model-name", Input).value = "vendor/model"
-            wizard.query_one("#api-key", Input).value = "memory-only-secret"
+            wizard.query_one("#api-key", Input).value = "saved-api-secret"
             await pilot.click("#save-model")
             await pilot.pause()
 
             assert isinstance(app.screen, ChatScreen)
             assert "vendor/model" in str(screen.query_one("#device-info", Static).content)
-            assert "memory-only-secret" not in preset_path.read_text(encoding="utf-8")
+            assert "saved-api-secret" not in preset_path.read_text(encoding="utf-8")
+            assert "saved-api-secret" not in preset_path.with_name(
+                "provider-secrets.json"
+            ).read_text(encoding="utf-8")
+            assert store.api_key(store.selected()) == "saved-api-secret"
+
+    asyncio.run(scenario())
+
+
+def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
+    async def scenario() -> None:
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        preset = _preset()
+        store.save(preset, api_key="delete-me-secret")
+        screen = ChatScreen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: _Runner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "/models"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ModelPickerScreen)
+            await pilot.click("#delete-saved-model")
+            await pilot.pause()
+            assert isinstance(app.screen, ApprovalScreen)
+            assert "Delete saved model" in str(
+                app.screen.query_one("#approval-title", Static).content
+            )
+            await pilot.click("#approve-plan")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ChatScreen)
+            assert store.list() == ()
+            assert store.api_key(preset) is None
+            assert "not selected" in str(
+                screen.query_one("#device-info", Static).content
+            )
 
     asyncio.run(scenario())
 

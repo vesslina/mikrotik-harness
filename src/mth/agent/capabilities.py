@@ -59,7 +59,7 @@ class ModelCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class ProviderPreset:
-    """Serializable provider metadata; the API key value is deliberately absent."""
+    """Serializable provider metadata; API key values live in a separate secure vault."""
 
     name: str
     provider: ProviderKind

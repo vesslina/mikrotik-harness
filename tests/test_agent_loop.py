@@ -150,6 +150,41 @@ def test_plan_mode_exposes_no_tools() -> None:
     asyncio.run(scenario())
 
 
+def test_agent_keeps_bounded_conversation_history_and_can_clear_it() -> None:
+    async def scenario() -> None:
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                self.calls += 1
+                contents = [message.get("content") for message in messages]
+                if self.calls == 1:
+                    assert "Remember bridge-lan" in contents
+                    return ProviderReply("I will remember bridge-lan.", ())
+                if self.calls == 2:
+                    assert "Remember bridge-lan" in contents
+                    assert "I will remember bridge-lan." in contents
+                    return ProviderReply("The remembered name is bridge-lan.", ())
+                assert "Remember bridge-lan" not in contents
+                return ProviderReply("No prior context remains.", ())
+
+        provider = Provider()
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=provider,
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+        )
+
+        await loop.run("Remember bridge-lan", AgentMode.PLAN)
+        await loop.run("What name did I give you?", AgentMode.PLAN)
+        loop.clear_history()
+        await loop.run("What do you remember?", AgentMode.PLAN)
+
+    asyncio.run(scenario())
+
+
 def test_provider_warmup_uses_hidden_tool_free_probe() -> None:
     async def scenario() -> None:
         class Provider:

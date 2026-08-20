@@ -32,6 +32,11 @@ from mth.agent.providers import (
     ProviderReply,
     ProviderToolCall,
 )
+from mth.agent.secret_store import (
+    ProviderSecretPaths,
+    ProviderSecretStore,
+    SecretProtector,
+)
 
 __all__ = [
     "AgentEvent",
@@ -50,6 +55,8 @@ __all__ = [
     "ProviderErrorCode",
     "ProviderPreset",
     "ProviderPresetStore",
+    "ProviderSecretPaths",
+    "ProviderSecretStore",
     "ProviderReply",
     "ProviderToolCall",
     "ProviderWarmup",
@@ -59,6 +66,7 @@ __all__ = [
     "ReasoningControl",
     "RiskLevel",
     "RunbookProposal",
+    "SecretProtector",
     "ToolCall",
     "ToolCallFormat",
     "ToolResult",

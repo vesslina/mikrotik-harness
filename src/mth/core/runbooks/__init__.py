@@ -23,6 +23,11 @@ from mth.core.runbooks.catalog import (
     WanNatDefinition,
     WanPppoeDefinition,
 )
+from mth.core.runbooks.extended import (
+    DhcpServerDefinition,
+    DnsResolverDefinition,
+    WireGuardPeerDefinition,
+)
 from mth.core.runbooks.history import (
     RunbookExecutionRecord,
     RunbookHistoryPaths,
@@ -42,6 +47,8 @@ from mth.core.runbooks.pppoe import (
 __all__ = [
     "DEFAULT_RUNBOOK_REGISTRY",
     "AdminServicesDefinition",
+    "DhcpServerDefinition",
+    "DnsResolverDefinition",
     "LanBridgeDefinition",
     "PppoeApplyResult",
     "PppoePlan",
@@ -70,4 +77,5 @@ __all__ = [
     "RunbookVerification",
     "WanNatDefinition",
     "WanPppoeDefinition",
+    "WireGuardPeerDefinition",
 ]

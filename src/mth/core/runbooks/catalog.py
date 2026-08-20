@@ -12,6 +12,11 @@ from mth.core.runbooks.base import (
     RunbookVerification,
     ToolSession,
 )
+from mth.core.runbooks.extended import (
+    DhcpServerDefinition,
+    DnsResolverDefinition,
+    WireGuardPeerDefinition,
+)
 
 
 def _records(result: McpToolResult, key: str) -> list[dict[str, Any]]:
@@ -635,7 +640,10 @@ DEFAULT_RUNBOOK_REGISTRY = RunbookRegistry(
     (
         WanPppoeDefinition(),
         LanBridgeDefinition(),
+        DhcpServerDefinition(),
+        DnsResolverDefinition(),
         WanNatDefinition(),
         AdminServicesDefinition(),
+        WireGuardPeerDefinition(),
     )
 )

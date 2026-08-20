@@ -29,6 +29,7 @@ class RunbookField:
     description: str = ""
     max_length: int = 256
     allowed_values: tuple[str, ...] = ()
+    human_only: bool = False
 
     @property
     def secret(self) -> bool:
@@ -152,7 +153,7 @@ class RunbookDefinition(ABC):
     def sanitize_proposal(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         sanitized: dict[str, Any] = {}
         for spec in self.fields:
-            if spec.secret or spec.name not in raw:
+            if spec.secret or spec.human_only or spec.name not in raw:
                 continue
             try:
                 sanitized[spec.name] = self._parse_field(spec, raw[spec.name])
@@ -163,7 +164,7 @@ class RunbookDefinition(ABC):
     def proposal_schema(self) -> dict[str, Any]:
         properties: dict[str, Any] = {}
         for spec in self.fields:
-            if spec.secret:
+            if spec.secret or spec.human_only:
                 continue
             if spec.kind is RunbookFieldKind.BOOLEAN:
                 schema: dict[str, Any] = {"type": "boolean"}
