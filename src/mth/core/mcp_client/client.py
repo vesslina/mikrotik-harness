@@ -10,7 +10,27 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from mth.core.mcp_client.models import BackendInspection, McpTool, McpToolResult
+from mth.core.mcp_client.rest_reader import RouterOsRestReader, RouterOsRestReadError
 from mth.core.mcp_client.runtime import MikroMcpRuntime
+
+_LIST_IP_ADDRESSES = McpTool(
+    name="list_ip_addresses",
+    description=(
+        "List IPv4 addresses assigned to RouterOS interfaces. This harness-owned read-only "
+        "extension fills a missing inspection tool in pinned MikroMCP; it never changes the router."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "routerId": {"type": "string", "description": "Connected RouterOS router ID"},
+            "interface": {"type": "string", "description": "Optional exact interface filter"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500},
+        },
+        "required": ["routerId"],
+        "additionalProperties": False,
+    },
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
 
 
 def _exception_leaves(error: BaseException) -> list[BaseException]:
@@ -94,7 +114,14 @@ class MikroMcpClient:
     async def list_tools(self) -> tuple[McpTool, ...]:
         async with self._session() as session:
             result = await session.list_tools()
-        return self._normalize_tools(result.tools)
+        tools = self._augment_read_catalog(self._normalize_tools(result.tools))
+        return tools
+
+    @staticmethod
+    def _augment_read_catalog(tools: tuple[McpTool, ...]) -> tuple[McpTool, ...]:
+        if any(tool.name == _LIST_IP_ADDRESSES.name for tool in tools):
+            return tools
+        return (*tools, _LIST_IP_ADDRESSES)
 
     @asynccontextmanager
     async def open_session(self) -> AsyncIterator[MikroMcpSession]:
@@ -146,10 +173,38 @@ class MikroMcpClient:
         name: str,
         arguments: Mapping[str, Any] | None = None,
     ) -> McpToolResult:
+        raw_arguments = dict(arguments or {})
+        if name == _LIST_IP_ADDRESSES.name:
+            return await self._list_ip_addresses(raw_arguments)
         async with self._session() as session:
-            result = await session.call_tool(name, dict(arguments or {}))
+            result = await session.call_tool(name, raw_arguments)
 
         return self._normalize_result(result)
+
+    async def _list_ip_addresses(self, arguments: Mapping[str, Any]) -> McpToolResult:
+        router_id = arguments.get("routerId")
+        interface = arguments.get("interface")
+        limit = arguments.get("limit", 500)
+        if not isinstance(router_id, str) or not router_id:
+            return McpToolResult(("routerId is required for list_ip_addresses.",), None, True)
+        if interface is not None and not isinstance(interface, str):
+            return McpToolResult(("interface must be a string when provided.",), None, True)
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            return McpToolResult(("limit must be an integer.",), None, True)
+        try:
+            records = await asyncio.to_thread(
+                RouterOsRestReader(self._environment).list_ip_addresses,
+                router_id,
+                interface=interface,
+                limit=limit,
+            )
+        except RouterOsRestReadError as error:
+            return McpToolResult((str(error),), None, True)
+        return McpToolResult(
+            (f"Listed {len(records)} RouterOS IP address record(s).",),
+            {"addresses": records},
+            False,
+        )
 
     @staticmethod
     def _normalize_result(result: Any) -> McpToolResult:

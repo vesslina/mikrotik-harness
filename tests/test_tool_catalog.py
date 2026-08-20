@@ -53,6 +53,11 @@ def test_capability_packs_route_representative_live_tools_and_proposals() -> Non
         "propose_ip_address",
     } <= addressing_names
 
+    ip_read = _tool("list_ip_addresses")
+    assert ip_read.name in {
+        tool.name for tool in router.select((ip_read,), ["addressing_services"]).tools
+    }
+
     firewall_names = {
         tool.name for tool in router.select(catalog, ["firewall_routing"]).tools
     }

@@ -166,6 +166,7 @@ TEXT: dict[str, dict[Language, str]] = {
     },
     "model.title": {Language.EN: "Configure model", Language.RU: "Настройка модели"},
     "models.title": {Language.EN: "Saved models", Language.RU: "Сохранённые модели"},
+    "sessions.title": {Language.EN: "Saved sessions", Language.RU: "Сохранённые сессии"},
     "approval.title": {
         Language.EN: "Do you want to apply this RouterOS plan?",
         Language.RU: "Применить этот план RouterOS?",

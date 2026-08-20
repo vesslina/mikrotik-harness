@@ -242,7 +242,7 @@ def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
             await pilot.pause()
 
             assert screen.query_one("#inline-models-view").display is True
-            await pilot.click("#inline-delete-model")
+            await pilot.press("delete")
             await pilot.pause()
             assert screen.query_one("#inline-approval-view").display is True
             assert "Delete saved model" in str(

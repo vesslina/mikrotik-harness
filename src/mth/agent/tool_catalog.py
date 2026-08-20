@@ -132,6 +132,7 @@ class ToolCatalogRouter:
                 "swos",
             ),
             "addressing_services": (
+                "ip_address",
                 "dhcp",
                 "dns",
                 "ip_pool",

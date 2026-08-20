@@ -99,6 +99,11 @@ classic Claude Code wordmark while retaining the harness's black, white, and red
   DHCP clients/static leases, DNS entries, firewall/mangle rules, policy routing, NTP/netwatch,
   logging, and PPP profiles. mth still owns router binding, dry-run, approval, apply,
   verification, history, and rollback.
+- Pinned MikroMCP 1.9 has `manage_ip_address` but no list operation for `/ip address`.
+  mth adds a narrowly scoped `list_ip_addresses` read tool: it uses the already registered
+  credentials, verifies the stored TLS fingerprint on every request, returns only address
+  metadata, and has no write path. This lets an agent inspect addresses before proposing a
+  one-address `propose_typed_manage_ip_address` change for approval.
 - After an approved apply, the selected model receives only the approved plan and verification
   outcome and writes a short user-facing completion report. The deterministic backend result
   remains visible as the source of truth if the provider is unavailable.

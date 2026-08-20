@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from rich.padding import Padding
@@ -15,6 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
+from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.selection import Selection
 from textual.strip import Strip
@@ -70,6 +72,8 @@ from mth.ui.textual.i18n import (
     UiSettingsStore,
     tr,
 )
+from mth.ui.textual.markdown import markdown_to_text
+from mth.ui.textual.sessions import ChatSession, ChatSessionStore, SessionTurn
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +129,32 @@ class ModelSelection:
 class ModelPickerResult:
     preset: ProviderPreset
     delete: bool = False
+
+
+class KeyboardPickerList(OptionList):
+    """OptionList with explicit Enter/double-click activation and Delete removal."""
+
+    class DeletePressed(Message):
+        def __init__(self, option_list: KeyboardPickerList) -> None:
+            super().__init__()
+            self.option_list = option_list
+
+    async def _on_click(self, event: events.Click) -> None:
+        clicked_option = (event.style.meta or {}).get("option")
+        if clicked_option is None:
+            return
+        if not self._options[clicked_option].disabled:
+            self.highlighted = clicked_option
+            if event.chain == 2:
+                self.action_select()
+        event.stop()
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key in {"delete", "backspace"}:
+            self.post_message(self.DeletePressed(self))
+            event.stop()
+            return
+        await super()._on_key(event)
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,12 +471,11 @@ class ModelPickerScreen(ModalScreen[ModelPickerResult | None]):
         ]
         with Vertical(id="model-picker-dialog"):
             yield Static("Saved models", id="model-picker-title")
-            yield OptionList(*options, id="saved-model-list", markup=False)
-            yield Static("↑/↓ choose  ·  Enter activate  ·  Esc cancel", id="model-picker-help")
-            with Horizontal(id="model-picker-actions"):
-                yield Button("Cancel", id="cancel-picker")
-                yield Button("Delete selected", id="delete-saved-model", variant="error")
-                yield Button("Use model", id="use-saved-model", variant="primary")
+            yield KeyboardPickerList(*options, id="saved-model-list", markup=False)
+            yield Static(
+                "↑/↓ choose  ·  Enter or double-click activate  ·  Del delete  ·  Esc cancel",
+                id="model-picker-help",
+            )
 
     def on_mount(self) -> None:
         option_list = self.query_one("#saved-model-list", OptionList)
@@ -464,19 +493,14 @@ class ModelPickerScreen(ModalScreen[ModelPickerResult | None]):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(ModelPickerResult(self._presets[event.option_index]))
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel-picker":
-            self.dismiss(None)
-        elif event.button.id in {"use-saved-model", "delete-saved-model"}:
-            option_list = self.query_one("#saved-model-list", OptionList)
-            index = option_list.highlighted
-            if index is not None:
-                self.dismiss(
-                    ModelPickerResult(
-                        self._presets[index],
-                        delete=event.button.id == "delete-saved-model",
-                    )
-                )
+    def on_keyboard_picker_list_delete_pressed(
+        self, event: KeyboardPickerList.DeletePressed
+    ) -> None:
+        if event.option_list.id != "saved-model-list":
+            return
+        index = event.option_list.highlighted
+        if index is not None and 0 <= index < len(self._presets):
+            self.dismiss(ModelPickerResult(self._presets[index], delete=True))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -635,6 +659,8 @@ class ChatScreen(Screen[None]):
         ("/info", "info"),
         ("/model", "model"),
         ("/models", "models"),
+        ("/history", "history"),
+        ("/resume", "resume"),
         ("/language", "language"),
         ("/pppoe", "pppoe"),
         ("/bridge", "bridge"),
@@ -656,6 +682,8 @@ class ChatScreen(Screen[None]):
         "info": ("router and session info", "информация о роутере и сессии"),
         "model": ("add or edit a model", "добавить или изменить модель"),
         "models": ("choose a saved model", "выбрать сохранённую модель"),
+        "history": ("browse saved sessions", "просмотреть сохранённые сессии"),
+        "resume": ("resume a saved session", "возобновить сохранённую сессию"),
         "language": ("change interface language", "изменить язык интерфейса"),
         "pppoe": ("configure WAN PPPoE safely", "безопасно настроить WAN PPPoE"),
         "bridge": ("create a LAN bridge safely", "безопасно создать LAN bridge"),
@@ -779,6 +807,7 @@ class ChatScreen(Screen[None]):
     .inline-actions { height: auto; align-horizontal: right; }
     .inline-actions Button { margin-left: 1; }
     #inline-models-list { height: auto; max-height: 12; border: none; background: #090909; }
+    #inline-sessions-list { height: auto; max-height: 14; border: none; background: #090909; }
     #inline-approval-options, #inline-language-options {
         height: auto;
         max-height: 7;
@@ -800,6 +829,7 @@ class ChatScreen(Screen[None]):
         runbook_factory: RunbookFactory | None = None,
         history_store: RunbookHistoryStore | None = None,
         settings_store: UiSettingsStore | None = None,
+        session_store: ChatSessionStore | None = None,
         language: Language | None = None,
     ) -> None:
         super().__init__()
@@ -811,6 +841,7 @@ class ChatScreen(Screen[None]):
         self._runbook_factory = runbook_factory or self._default_runbook_factory
         self._history = history_store or RunbookHistoryStore()
         self._settings = settings_store or UiSettingsStore()
+        self._sessions = session_store or ChatSessionStore()
         self._language = language or self._settings.language()
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
@@ -835,6 +866,9 @@ class ChatScreen(Screen[None]):
         self._phrase_cursor = 0
         self._last_activity_elapsed = 0
         self._tool_trace: list[str] = []
+        self._session: ChatSession | None = None
+        self._session_picker_sessions: tuple[ChatSession, ...] = ()
+        self._transcript_group: str | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -891,12 +925,12 @@ class ChatScreen(Screen[None]):
                 yield Static("", id="inline-model-help", classes="interaction-help")
             with Vertical(id="inline-models-view", classes="interaction-view"):
                 yield Static("", id="inline-models-title", classes="interaction-title")
-                yield OptionList(id="inline-models-list", markup=False)
-                with Horizontal(classes="inline-actions"):
-                    yield Button("Cancel", id="inline-cancel-models")
-                    yield Button("Delete selected", id="inline-delete-model", variant="error")
-                    yield Button("Use model", id="inline-use-model", variant="primary")
+                yield KeyboardPickerList(id="inline-models-list", markup=False)
                 yield Static("", id="inline-models-help", classes="interaction-help")
+            with Vertical(id="inline-sessions-view", classes="interaction-view"):
+                yield Static("", id="inline-sessions-title", classes="interaction-title")
+                yield KeyboardPickerList(id="inline-sessions-list", markup=False)
+                yield Static("", id="inline-sessions-help", classes="interaction-help")
             with Vertical(id="inline-runbook-view", classes="interaction-view"):
                 yield Static("", id="inline-runbook-title", classes="interaction-title")
                 yield Static("", id="inline-runbook-body", classes="interaction-body", markup=False)
@@ -994,24 +1028,26 @@ class ChatScreen(Screen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
-        if button_id in {
-            "inline-cancel-model",
-            "inline-cancel-models",
-            "inline-cancel-runbook",
-        }:
+        if button_id in {"inline-cancel-model", "inline-cancel-runbook"}:
             self.action_cancel_interaction()
         elif button_id == "inline-save-model":
             self._save_inline_model()
-        elif button_id == "inline-use-model":
-            self._use_inline_model()
-        elif button_id == "inline-delete-model":
-            self._delete_inline_model()
         elif button_id == "inline-plan-runbook":
             self._submit_inline_runbook()
+
+    def on_keyboard_picker_list_delete_pressed(
+        self, event: KeyboardPickerList.DeletePressed
+    ) -> None:
+        if event.option_list.id == "inline-models-list":
+            self._delete_inline_model()
+        elif event.option_list.id == "inline-sessions-list":
+            self._delete_inline_session()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list.id == "inline-models-list":
             self._use_inline_model(event.option_index)
+        elif event.option_list.id == "inline-sessions-list":
+            self._resume_inline_session(event.option_index)
         elif event.option_list.id == "inline-approval-options":
             self._choose_inline_approval(event.option_index)
         elif event.option_list.id == "inline-language-options":
@@ -1047,6 +1083,8 @@ class ChatScreen(Screen[None]):
 
     def action_clear_chat(self) -> None:
         self.query_one("#transcript", RichLog).clear()
+        self._transcript_group = None
+        self._session = None
         clear_history = getattr(self._agent, "clear_history", None)
         if callable(clear_history):
             clear_history()
@@ -1076,8 +1114,9 @@ class ChatScreen(Screen[None]):
             )
             return
         title = "Детали инструментов" if self._language is Language.RU else "Tool details"
-        self.query_one("#transcript", RichLog).write(
-            Text(title + "\n  " + "\n  ".join(self._tool_trace), style="#8b949e")
+        self._write_transcript(
+            Text(title + "\n  " + "\n  ".join(self._tool_trace), style="#8b949e"),
+            group="tool",
         )
 
     def _show_inline(self, interaction: str, view_id: str, focus_id: str) -> None:
@@ -1215,6 +1254,9 @@ class ChatScreen(Screen[None]):
         self._refresh_language()
         self._refresh_header()
         self._refresh_mode()
+        set_response_language = getattr(self._agent, "set_response_language", None)
+        if callable(set_response_language):
+            set_response_language(language.value)
         self._write_system(tr(self._language, "language.changed"))
 
     def _show_approval(
@@ -1349,7 +1391,7 @@ class ChatScreen(Screen[None]):
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /model  /models [name]  /language [en|ru]  "
+                "/help  /info  /model  /models [name]  /history  /resume [id]  /language [en|ru]  "
                 "/pppoe  /bridge  /ip-address  /address-list  /dhcp  /dns  "
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
                 "/log  /copy  /clear  /exit\n"
@@ -1367,6 +1409,10 @@ class ChatScreen(Screen[None]):
             self._show_model_form()
         elif command == "/models":
             self._show_models(argument.strip())
+        elif command == "/history":
+            self._show_sessions()
+        elif command == "/resume":
+            self._resume_requested(argument.strip())
         elif command == "/language":
             requested_language = argument.strip().casefold()
             if requested_language in {Language.EN, Language.RU}:
@@ -1416,6 +1462,104 @@ class ChatScreen(Screen[None]):
             self._write_system("No saved presets. Use /model.")
             return
         self._show_model_picker(presets)
+
+    def _show_sessions(self) -> None:
+        try:
+            sessions = self._sessions.list(self.profile.router_id)
+        except (OSError, ValueError) as error:
+            self._write_system(f"Could not read sessions: {error}", error=True)
+            return
+        if not sessions:
+            self._write_system(
+                "Нет сохранённых сессий." if self._language is Language.RU else "No saved sessions."
+            )
+            return
+        self._session_picker_sessions = sessions
+        options = [Option(self._session_label(session)) for session in sessions]
+        option_list = self.query_one("#inline-sessions-list", KeyboardPickerList)
+        option_list.clear_options()
+        option_list.add_options(options)
+        option_list.highlighted = 0
+        self._show_inline("sessions", "#inline-sessions-view", "#inline-sessions-list")
+
+    def _resume_requested(self, requested: str) -> None:
+        try:
+            session = (
+                self._sessions.latest(self.profile.router_id)
+                if not requested
+                else self._sessions.find(requested, self.profile.router_id)
+            )
+        except (OSError, ValueError) as error:
+            self._write_system(f"Could not read sessions: {error}", error=True)
+            return
+        if session is None:
+            self._write_system(
+                "Сессия не найдена." if self._language is Language.RU else "Session not found.",
+                error=True,
+            )
+            return
+        self._resume_session(session)
+
+    def _selected_inline_session(self, index: int | None = None) -> ChatSession | None:
+        option_list = self.query_one("#inline-sessions-list", KeyboardPickerList)
+        selected = option_list.highlighted if index is None else index
+        if selected is None or not 0 <= selected < len(self._session_picker_sessions):
+            return None
+        return self._session_picker_sessions[selected]
+
+    def _resume_inline_session(self, index: int | None = None) -> None:
+        session = self._selected_inline_session(index)
+        if session is not None:
+            self._resume_session(session)
+
+    def _resume_session(self, session: ChatSession) -> None:
+        self._session = session
+        self._close_inline()
+        self._transcript_group = None
+        transcript = self.query_one("#transcript", TranscriptLog)
+        transcript.clear()
+        load_history = getattr(self._agent, "load_history", None)
+        if callable(load_history):
+            load_history(tuple((turn.prompt, turn.response) for turn in session.turns))
+        for turn in session.turns:
+            self._write_transcript(
+                Padding(Text(f"❯ {turn.prompt}", style="bold white"), (0, 1), style="on #303030"),
+                group="user",
+            )
+            self._write_transcript(
+                Padding(markdown_to_text(turn.response), (0, 1)), group="assistant"
+            )
+        self._write_system(
+            f"Сессия возобновлена: {session.title}" if self._language is Language.RU
+            else f"Session resumed: {session.title}"
+        )
+
+    def _delete_inline_session(self) -> None:
+        session = self._selected_inline_session()
+        if session is None:
+            return
+        try:
+            self._sessions.delete(session.session_id, self.profile.router_id)
+        except (KeyError, OSError, ValueError) as error:
+            self._write_system(f"Could not delete session: {error}", error=True)
+            return
+        if self._session is not None and self._session.session_id == session.session_id:
+            self._session = None
+        self._write_system(
+            f"Сессия удалена: {session.title}" if self._language is Language.RU
+            else f"Session deleted: {session.title}"
+        )
+        self._close_inline()
+
+    @staticmethod
+    def _session_label(session: ChatSession) -> str:
+        try:
+            stamp = datetime.fromisoformat(session.updated_at).astimezone().strftime(
+                "%H:%M %d.%m.%y"
+            )
+        except ValueError:
+            stamp = "--:-- --.--.--"
+        return f"{stamp}  ·  {session.title}\n    {session.session_id}"
 
     def _model_selected(self, selection: ModelSelection | None) -> None:
         if selection is None:
@@ -1478,6 +1622,9 @@ class ChatScreen(Screen[None]):
             self._session_api_keys[preset.name] = api_key
         self._preset = preset
         self._agent = agent
+        set_response_language = getattr(agent, "set_response_language", None)
+        if callable(set_response_language):
+            set_response_language(self._language.value)
         set_progress_sink = getattr(agent, "set_progress_sink", None)
         if callable(set_progress_sink):
             set_progress_sink(self._render_event)
@@ -1705,6 +1852,19 @@ class ChatScreen(Screen[None]):
         else:
             for event in events:
                 self._render_event(event)
+            report_text = next(
+                (event.text for event in events if isinstance(event, AgentMessage)),
+                "",
+            )
+            if report_text and self._session is not None:
+                try:
+                    self._session = self._sessions.append_response(
+                        self._session.session_id,
+                        self.profile.router_id,
+                        report_text,
+                    )
+                except (KeyError, OSError, ValueError) as error:
+                    self._write_system(f"Could not update session: {error}", error=True)
         finally:
             self._stop_activity()
 
@@ -1800,12 +1960,13 @@ class ChatScreen(Screen[None]):
 
     def _submit_prompt(self, prompt: str) -> None:
         self._tool_trace.clear()
-        self.query_one("#transcript", RichLog).write(
+        self._write_transcript(
             Padding(
                 Text(f"❯ {prompt}", style="bold white"),
                 (0, 1),
                 style="on #303030",
-            )
+            ),
+            group="user",
         )
         if self._agent is None:
             self._write_system("Select a model first with /model.", error=True)
@@ -1845,6 +2006,17 @@ class ChatScreen(Screen[None]):
                     )
                 else:
                     self._open_runbook(definition, proposal)
+            completed = next(
+                (event for event in reversed(events)
+                 if isinstance(event, FinalSummary) and event.outcome is FinalOutcome.COMPLETED),
+                None,
+            )
+            response = next(
+                (event.text for event in reversed(events) if isinstance(event, AgentMessage)),
+                completed.text if completed is not None else "",
+            )
+            if response:
+                await self._record_session_turn(prompt, response)
         finally:
             self._stop_activity()
             input_widget = self.query_one("#chat-input", Input)
@@ -1890,10 +2062,59 @@ class ChatScreen(Screen[None]):
             self._activity_timer = None
         self.query_one("#activity-line", Static).display = False
 
+    def _write_transcript(self, renderable: object, *, group: str) -> None:
+        """Write one transcript item, separating semantic groups with one blank line."""
+
+        log = self.query_one("#transcript", TranscriptLog)
+        if self._transcript_group is not None and self._transcript_group != group:
+            log.write("")
+        log.write(renderable)
+        self._transcript_group = group
+
+    async def _record_session_turn(self, prompt: str, response: str) -> None:
+        """Persist a completed interaction and lazily generate its compact title."""
+
+        try:
+            if self._session is None:
+                title = self._fallback_session_title(prompt)
+                name_session = getattr(self._agent, "name_session", None)
+                if callable(name_session):
+                    self._start_activity()
+                    try:
+                        generated = await name_session(prompt, response)
+                    except Exception:
+                        generated = ""
+                    finally:
+                        self._stop_activity()
+                    if generated:
+                        title = generated
+                self._session = self._sessions.create(
+                    self.profile.router_id,
+                    title,
+                    (SessionTurn(prompt, response),),
+                    model=self._preset.model if self._preset else None,
+                )
+                self._write_system(
+                    f"Сессия сохранена: {title}" if self._language is Language.RU
+                    else f"Session saved: {title}"
+                )
+            else:
+                self._session = self._sessions.append_turn(
+                    self._session.session_id,
+                    self.profile.router_id,
+                    SessionTurn(prompt, response),
+                )
+        except (OSError, ValueError, KeyError) as error:
+            self._write_system(f"Could not save session: {error}", error=True)
+
+    @staticmethod
+    def _fallback_session_title(prompt: str) -> str:
+        words = re.sub(r"[^\w\-]+", " ", prompt, flags=re.UNICODE).split()
+        return " ".join(words[:5]) or "Новая сессия"
+
     def _render_event(self, event: AgentEvent) -> None:
-        log = self.query_one("#transcript", RichLog)
         if isinstance(event, AgentMessage):
-            log.write(Text(f"● {event.text}", style="white"))
+            self._write_transcript(markdown_to_text(f"● {event.text}"), group="assistant")
         elif isinstance(event, ReasoningStatus):
             detail = (
                 f"{event.token_count} {tr(self._language, 'reasoning.tokens')}"
@@ -1902,7 +2123,7 @@ class ChatScreen(Screen[None]):
             )
             if event.recovered_final_answer:
                 detail += " · " + tr(self._language, "reasoning.recovered")
-            log.write(
+            self._write_transcript(
                 Text(
                     (
                         f"✦ Размышлял {self._last_activity_elapsed}с · {detail}"
@@ -1910,36 +2131,41 @@ class ChatScreen(Screen[None]):
                         else f"✦ Thought for {self._last_activity_elapsed}s · {detail}"
                     ),
                     style="#ff8a73",
-                )
+                ),
+                group="assistant",
             )
         elif isinstance(event, PlannedAction):
-            log.write(Text(f"  {event.summary}", style="#b6b6b6"))
+            self._write_transcript(Text(f"  {event.summary}", style="#b6b6b6"), group="tool")
         elif isinstance(event, ToolCall):
             self._tool_trace.append(
                 f"{event.tool_name} "
                 + json.dumps(event.arguments, ensure_ascii=False, sort_keys=True)
             )
-            log.write(Text(f"  └ {event.tool_name}", style="#8b949e"))
+            self._write_transcript(Text(f"  └ {event.tool_name}", style="#8b949e"), group="tool")
         elif isinstance(event, ToolResult):
             status = "error" if event.is_error else "done"
             style = "#ff6b62" if event.is_error else "#7fd88f"
-            log.write(Text(f"    ↳ {status}", style=style))
+            self._write_transcript(Text(f"    ↳ {status}", style=style), group="tool")
         elif isinstance(event, RunbookProposal):
             try:
                 title = self._definition_for_id(event.runbook).title
             except KeyError:
                 title = event.runbook
-            log.write(
+            self._write_transcript(
                 Text(
                     f"  ↳ {title} proposal ready · opening approval workflow",
                     style="#ffb454",
-                )
+                ),
+                group="tool",
             )
         elif isinstance(event, VerificationResult):
             style = "#7fd88f" if event.passed else "#ff6b62"
-            log.write(Text(f"  verify: {event.check} — {event.details}", style=style))
+            self._write_transcript(
+                Text(f"  verify: {event.check} — {event.details}", style=style),
+                group="tool",
+            )
         elif isinstance(event, FinalSummary) and event.outcome is not FinalOutcome.COMPLETED:
-            log.write(Text(event.text, style="#ffb454"))
+            self._write_transcript(Text(event.text, style="#ffb454"), group="assistant")
 
     def _refresh_header(self) -> None:
         model = self._preset.model if self._preset else (
@@ -2020,6 +2246,9 @@ class ChatScreen(Screen[None]):
         self.query_one("#inline-models-title", Static).update(
             tr(self._language, "models.title")
         )
+        self.query_one("#inline-sessions-title", Static).update(
+            tr(self._language, "sessions.title")
+        )
         self.query_one("#inline-language-title", Static).update(
             tr(self._language, "language.title")
         )
@@ -2029,6 +2258,7 @@ class ChatScreen(Screen[None]):
         for selector in (
             "#inline-model-help",
             "#inline-models-help",
+            "#inline-sessions-help",
             "#inline-runbook-help",
             "#inline-language-help",
         ):
@@ -2051,9 +2281,6 @@ class ChatScreen(Screen[None]):
         button_labels = {
             "#inline-cancel-model": ("Cancel", "Отмена"),
             "#inline-save-model": ("Use model", "Использовать модель"),
-            "#inline-cancel-models": ("Cancel", "Отмена"),
-            "#inline-delete-model": ("Delete selected", "Удалить выбранную"),
-            "#inline-use-model": ("Use model", "Использовать модель"),
             "#inline-cancel-runbook": ("Cancel", "Отмена"),
             "#inline-plan-runbook": ("Build dry-run plan", "Создать dry-run план"),
         }
@@ -2078,4 +2305,4 @@ class ChatScreen(Screen[None]):
 
     def _write_system(self, message: str, *, error: bool = False) -> None:
         style = "#ff6b62" if error else "#8b949e"
-        self.query_one("#transcript", RichLog).write(Text(message, style=style))
+        self._write_transcript(Text(message, style=style), group="system")
