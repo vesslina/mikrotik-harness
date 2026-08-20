@@ -14,6 +14,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.selection import Selection
+from textual.strip import Strip
 from textual.timer import Timer
 from textual.widgets import Button, Checkbox, Input, Label, OptionList, RichLog, Select, Static
 from textual.widgets.option_list import Option
@@ -127,6 +129,38 @@ class RunbookSelection:
     submission: RunbookSubmission = field(repr=False)
 
 
+class TranscriptLog(RichLog):
+    """A RichLog with real mouse selection and clipboard extraction."""
+
+    def plain_text(self) -> str:
+        return "\n".join(line.text.rstrip() for line in self.lines).rstrip()
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        return selection.extract(self.plain_text()), "\n"
+
+    def selection_updated(self, selection: Selection | None) -> None:
+        self._line_cache.clear()
+        self.refresh()
+
+    def _render_line(self, y: int, scroll_x: int, width: int) -> Strip:
+        selection = self.text_selection
+        if selection is None or y >= len(self.lines):
+            return super()._render_line(y, scroll_x, width)
+        line = self.lines[y]
+        if (span := selection.get_span(y)) is not None:
+            start, end = span
+            end = line.cell_length if end == -1 else end
+            selection_style = self.screen.get_component_rich_style("screen--selection")
+            line = Strip.join(
+                (
+                    line.crop(0, start),
+                    line.crop(start, end).apply_style(selection_style),
+                    line.crop(end),
+                )
+            )
+        return line.crop_extend(scroll_x, scroll_x + width, self.rich_style)
+
+
 class PixelLogo(Static):
     GLYPHS = {
         "A": ("01110", "10001", "11111", "10001", "10001"),
@@ -181,6 +215,7 @@ class PixelLogo(Static):
         output.append_text(self._shadowed_word("MIKROTIK", "white", "#5c5c5c"))
         output.append("\n\n", style="on #090909")
         output.append_text(self._shadowed_word("HARNESS", "#ff3b30", "#681d1d"))
+        output.append("\n", style="on #090909")
         return output
 
 
@@ -573,6 +608,7 @@ class ChatScreen(Screen[None]):
         ("/wireguard", "wireguard"),
         ("/rollback", "rollback"),
         ("/log", "log"),
+        ("/copy", "copy"),
         ("/clear", "clear"),
         ("/exit", "exit"),
     )
@@ -591,6 +627,7 @@ class ChatScreen(Screen[None]):
         "wireguard": ("create a WireGuard peer", "создать WireGuard peer"),
         "rollback": ("rollback a runbook", "откатить runbook"),
         "log": ("session log info", "информация о журнале"),
+        "copy": ("copy the transcript", "скопировать весь чат"),
         "clear": ("clear transcript and memory", "очистить чат и память"),
         "exit": ("return to discovery", "вернуться к discovery"),
     }
@@ -630,19 +667,20 @@ class ChatScreen(Screen[None]):
         Binding("tab", "cycle_mode", "Cycle mode", show=False, priority=True),
         Binding("escape", "cancel_interaction", "Cancel", show=False, priority=True),
         Binding("ctrl+o", "tool_details", "Tool details", show=False),
+        Binding("ctrl+shift+c", "copy_transcript", "Copy transcript", show=False),
         Binding("ctrl+l", "clear_chat", "Clear", show=False),
     ]
 
     CSS = """
     ChatScreen { background: #090909; color: #e7e7e7; }
     #chat-header {
-        height: 15;
+        height: 16;
         padding: 1 2;
         background: #090909;
         border-bottom: solid #5b6268;
     }
-    #brand { width: 48; min-width: 48; height: 13; background: #090909; }
-    #device-info { width: 1fr; height: 13; padding-left: 2; color: #9aa2aa; }
+    #brand { width: 48; min-width: 48; height: 14; background: #090909; }
+    #device-info { width: 1fr; height: 14; padding-left: 2; color: #9aa2aa; }
     #transcript { height: 1fr; padding: 1 3; background: #090909; scrollbar-color: #5b6268; }
     #activity-line {
         display: none;
@@ -753,7 +791,7 @@ class ChatScreen(Screen[None]):
         with Horizontal(id="chat-header"):
             yield PixelLogo(id="brand")
             yield Static("", id="device-info", markup=False)
-        yield RichLog(id="transcript", wrap=True, markup=False, auto_scroll=True)
+        yield TranscriptLog(id="transcript", wrap=True, markup=False, auto_scroll=True)
         yield Static("", id="activity-line", markup=False)
         with VerticalScroll(id="interaction-panel"):
             with Vertical(id="inline-model-view", classes="interaction-view"):
@@ -858,7 +896,16 @@ class ChatScreen(Screen[None]):
             self._write_system(f"Could not load model presets: {error}", error=True)
             selected = None
         if selected is not None:
-            self._activate_preset(selected, self._preset_store.api_key(selected), persist=False)
+            try:
+                api_key = self._preset_store.api_key(selected)
+            except (OSError, ValueError) as error:
+                self._write_system(
+                    f"Could not decrypt the saved API key: {error}. "
+                    "Re-enter it with /model.",
+                    error=True,
+                )
+                api_key = None
+            self._activate_preset(selected, api_key, persist=False)
         self._refresh_header()
         self._refresh_mode()
         self._write_system(tr(self._language, "chat.connected"))
@@ -955,6 +1002,21 @@ class ChatScreen(Screen[None]):
         if callable(clear_history):
             clear_history()
         self._write_system(tr(self._language, "chat.cleared"))
+
+    def action_copy_transcript(self) -> None:
+        transcript = self.query_one("#transcript", TranscriptLog)
+        text = transcript.plain_text()
+        if not text:
+            self._write_system(
+                "Чат пока пуст." if self._language is Language.RU else "Transcript is empty."
+            )
+            return
+        self.app.copy_to_clipboard(text)
+        self._write_system(
+            "Чат скопирован в буфер обмена."
+            if self._language is Language.RU
+            else "Transcript copied to the clipboard."
+        )
 
     def action_tool_details(self) -> None:
         if not self._tool_trace:
@@ -1241,7 +1303,7 @@ class ChatScreen(Screen[None]):
                 "/help  /info  /model  /models [name]  /language [en|ru]  "
                 "/pppoe  /bridge  /dhcp  /dns  "
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
-                "/log  /clear  /exit\n"
+                "/log  /copy  /clear  /exit\n"
                 + (
                     "Tab переключает PLAN и READY. Изменения доступны только через "
                     "подтверждённые runbook'и."
@@ -1279,6 +1341,8 @@ class ChatScreen(Screen[None]):
             self._write_system(
                 "Session transcript is already displayed above; backend audit is local."
             )
+        elif command == "/copy":
+            self.action_copy_transcript()
         elif command == "/clear":
             self.action_clear_chat()
         elif command == "/exit":

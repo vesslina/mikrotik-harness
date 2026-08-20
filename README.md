@@ -17,9 +17,11 @@ npm --prefix external/mikromcp run build
 .venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-MikroMCP is pinned as a git submodule at `v1.9.0`; the harness never modifies its code. On a
-machine where npm is unavailable, pnpm can install the same source dependencies and run its
-local `node_modules/.bin/tsup` builder.
+MikroMCP is pinned as a git submodule at `v1.9.0`; the harness never modifies its source. At
+runtime, mth creates an ignored `dist/mth-main.js` compatibility copy that fixes RouterOS
+singleton setters such as `/ip/dns`; it fails closed if the pinned bundle no longer matches the
+reviewed patch. On a machine where npm is unavailable, pnpm can install the same source
+dependencies and run its local `node_modules/.bin/tsup` builder.
 
 ## Terminal UI
 
@@ -95,8 +97,9 @@ classic Claude Code wordmark while retaining the harness's black, white, and red
 - `/rollback [execution-id|journal-id]` previews and confirms rollback of the complete runbook.
   History is stored without secrets under `.mth/runbook-history.json`, so rollback still works
   after restarting `mth`. Omitting the ID selects the most recent eligible execution.
-- `/help`, `/info`, `/log`, `/clear`, and `/exit` provide the remaining command surface. `/clear`
-  clears both the visible transcript and the model's in-process conversation memory.
+- `/help`, `/info`, `/log`, `/copy`, `/clear`, and `/exit` provide the remaining command surface.
+  `/copy` or `Ctrl+Shift+C` copies the complete transcript; `/clear` clears both the visible
+  transcript and the model's in-process conversation memory.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
 - Model setup, saved-model selection, runbook forms, deletion, apply, rollback, and language
@@ -126,6 +129,10 @@ time. Exact reasoning-token usage appears when the provider returns it; non-stre
 providers cannot report a trustworthy live token counter, so the active line shows an ellipsis
 instead of inventing one. Tool actions appear as they happen between model rounds; `Ctrl+O`
 expands the current turn's bound tool names and arguments.
+
+Transcript text can also be selected with the mouse and copied with `Ctrl+C`. On Windows, mth
+synchronizes Textual's clipboard with the native OS clipboard, so `Ctrl+V` works in input fields
+even in a legacy PowerShell console that does not emit a bracketed-paste event.
 
 MCP tool results are recursively redacted before both the transcript event and the next LLM
 request. Credential-shaped fields such as passwords, API keys, private keys, communities, and

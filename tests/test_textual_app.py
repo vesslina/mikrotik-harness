@@ -4,6 +4,7 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
 from mth.core.registration import PendingRegistration, RegistrationResult
+from mth.ui.textual import clipboard as system_clipboard
 from mth.ui.textual.app import DiscoveryApp
 from mth.ui.textual.chat import ChatScreen
 from mth.ui.textual.i18n import Language
@@ -110,6 +111,20 @@ def test_discovery_uses_russian_ui_when_selected() -> None:
             )
 
     asyncio.run(scenario())
+
+
+def test_app_bridges_textual_and_system_clipboards(monkeypatch) -> None:
+    written: list[str] = []
+    monkeypatch.setattr(system_clipboard, "read_text", lambda: "из Windows clipboard")
+    monkeypatch.setattr(system_clipboard, "write_text", lambda value: written.append(value))
+    app = DiscoveryApp(
+        discoverer=lambda **_kwargs: DiscoveryResult(devices=()),
+        language=Language.RU,
+    )
+
+    assert app.clipboard == "из Windows clipboard"
+    app.copy_to_clipboard("текст из mth")
+    assert written == ["текст из mth"]
 
 
 class _FakeRegistrar:

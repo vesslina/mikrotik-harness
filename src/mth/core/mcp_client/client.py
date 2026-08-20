@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -10,6 +11,27 @@ from mcp.client.stdio import stdio_client
 
 from mth.core.mcp_client.models import BackendInspection, McpTool, McpToolResult
 from mth.core.mcp_client.runtime import MikroMcpRuntime
+
+
+def _exception_leaves(error: BaseException) -> list[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        leaves: list[BaseException] = []
+        for nested in error.exceptions:
+            leaves.extend(_exception_leaves(nested))
+        return leaves
+    return [error]
+
+
+def unwrap_exception_group(error: BaseExceptionGroup) -> BaseException:
+    """Return the useful cause hidden by an AnyIO/MCP task group."""
+
+    leaves = _exception_leaves(error)
+    non_cancelled = [leaf for leaf in leaves if not isinstance(leaf, asyncio.CancelledError)]
+    candidates = non_cancelled or leaves
+    if len(candidates) == 1:
+        return candidates[0]
+    details = "; ".join(dict.fromkeys(str(candidate) for candidate in candidates))
+    return RuntimeError(details or str(error))
 
 
 class MikroMcpSession:
@@ -54,13 +76,20 @@ class MikroMcpClient:
             cwd=str(self._runtime.backend_dir),
             env=self._runtime.process_environment(self._environment),
         )
-        async with stdio_client(parameters) as (read_stream, write_stream), ClientSession(
-            read_stream,
-            write_stream,
-            read_timeout_seconds=timedelta(seconds=self._read_timeout),
-        ) as session:
-            await session.initialize()
-            yield session
+        try:
+            async with stdio_client(parameters) as (
+                read_stream,
+                write_stream,
+            ), ClientSession(
+                read_stream,
+                write_stream,
+                read_timeout_seconds=timedelta(seconds=self._read_timeout),
+            ) as session:
+                await session.initialize()
+                yield session
+        except BaseExceptionGroup as error:
+            useful_cause = unwrap_exception_group(error)
+            raise useful_cause from error
 
     async def list_tools(self) -> tuple[McpTool, ...]:
         async with self._session() as session:

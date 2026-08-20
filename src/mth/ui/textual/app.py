@@ -17,6 +17,7 @@ from mth.core.registration import (
     RegistrationResult,
     RegistrationService,
 )
+from mth.ui.textual import clipboard as system_clipboard
 from mth.ui.textual.chat import ChatProfile, ChatScreen
 from mth.ui.textual.i18n import Language, UiSettingsStore, tr
 
@@ -212,6 +213,19 @@ class DiscoveryApp(App[None]):
         self._selected_device: DeviceInfo | None = None
         self._discovery_generation = 0
         self._pending_fingerprint: PendingRegistration | None = None
+
+    @property
+    def clipboard(self) -> str:
+        """Prefer the OS clipboard when a terminal sends Ctrl+V as a key."""
+
+        system_value = system_clipboard.read_text()
+        return super().clipboard if system_value is None else system_value
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Keep Textual's OSC52 clipboard and the Windows clipboard in sync."""
+
+        super().copy_to_clipboard(text)
+        system_clipboard.write_text(text)
 
     def compose(self) -> ComposeResult:
         yield Header()

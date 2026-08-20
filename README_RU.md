@@ -19,7 +19,9 @@ npm --prefix external/mikromcp run build
 ```
 
 MikroMCP подключён как git submodule и закреплён на `v1.9.0`. Harness не изменяет его исходники.
-Если npm недоступен, тот же backend можно собрать локальным `pnpm`.
+При запуске mth создаёт игнорируемую compatibility-копию `dist/mth-main.js`, исправляющую запись
+RouterOS singleton-меню вроде `/ip/dns`; при несовпадении с проверенной версией патч применяется
+fail-closed. Если npm недоступен, тот же backend можно собрать локальным `pnpm`.
 
 ## Терминальный интерфейс
 
@@ -82,7 +84,8 @@ IP должен быть стабильным management-адресом роут
 - `/pppoe`, `/bridge`, `/dhcp`, `/dns`, `/nat`, `/services`, `/wireguard` — открыть безопасный
   schema-driven runbook в READY.
 - `/rollback [execution-id|journal-id]` — показать preview и откатить полное выполнение runbook.
-- `/help`, `/info`, `/log`, `/clear`, `/exit` — остальные команды.
+- `/help`, `/info`, `/log`, `/copy`, `/clear`, `/exit` — остальные команды. `/copy` или
+  `Ctrl+Shift+C` копирует весь transcript.
 
 При первом запуске язык определяется по locale операционной системы. Выбранное значение хранится
 в `.mth/settings.json`. `/clear` очищает и видимый transcript, и in-process память модели.
@@ -97,6 +100,10 @@ IP должен быть стабильным management-адресом роут
 tokens показывается после ответа, если провайдер его вернул. Для non-streaming API live-счётчик
 токенов недостоверен, поэтому до ответа интерфейс честно показывает `…`. Между раундами tool calls
 появляются в transcript сразу; `Ctrl+O` раскрывает имена и привязанные аргументы инструментов.
+
+Текст transcript можно выделить мышью и скопировать через `Ctrl+C`. В Windows mth синхронизирует
+внутренний clipboard Textual с системным, поэтому `Ctrl+V` работает в полях даже в старом окне
+PowerShell, которое не отправляет bracketed-paste событие.
 
 `Tab` в обычном composer переключает режимы:
 

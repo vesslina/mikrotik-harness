@@ -1,6 +1,8 @@
 import asyncio
 
 from textual.app import App
+from textual.geometry import Offset
+from textual.selection import Selection
 from textual.widgets import Input, OptionList, Static
 
 from mth.agent import (
@@ -129,6 +131,10 @@ class _ChatApp(App[None]):
     def __init__(self, screen: ChatScreen) -> None:
         super().__init__()
         self._chat_screen = screen
+        self.copied_text: list[str] = []
+
+    def copy_to_clipboard(self, text: str) -> None:
+        self.copied_text.append(text)
 
     async def on_mount(self) -> None:
         await self.push_screen(self._chat_screen)
@@ -258,13 +264,43 @@ def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
 def test_pixel_logo_has_two_five_row_words() -> None:
     rendered = PixelLogo().render()
 
-    assert rendered.plain.count("\n") == 12
+    assert rendered.plain.count("\n") == 13
     assert "\n\n" in rendered.plain
     assert "█" in rendered.plain
     assert "▓" in rendered.plain
+    assert "▓" in rendered.plain.splitlines()[-1]
     assert max(len(line) for line in rendered.plain.splitlines()) <= 48
     assert any("ff3b30" in str(span.style) for span in rendered.spans)
     assert any("681d1d" in str(span.style) for span in rendered.spans)
+
+
+def test_transcript_is_selectable_and_can_be_copied(tmp_path) -> None:
+    async def scenario() -> None:
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(
+                PresetPaths(file=tmp_path / "providers.json")
+            ),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen._write_system("Selectable transcript line")
+            await pilot.pause()
+
+            transcript = screen.query_one("#transcript")
+            selected = transcript.get_selection(
+                Selection.from_offsets(Offset(0, 0), Offset(9, 0))
+            )
+            assert selected is not None
+            assert selected[0]
+            screen.action_copy_transcript()
+            assert app.copied_text
+            assert "Selectable transcript line" in app.copied_text[-1]
+
+    asyncio.run(scenario())
 
 
 def test_slash_command_hints_filter_and_tab_completes(tmp_path) -> None:

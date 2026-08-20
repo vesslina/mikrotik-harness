@@ -16,3 +16,14 @@ because a similarly named backend tool exists.
 Closing a row requires reviewing the exact new backend schema, snapshot paths, dry-run behavior,
 idempotency, confirmation flow, and post-check fields. Do not unpin or locally fork MikroMCP only
 to make a runbook appear complete; track an upstream change deliberately.
+
+## Reviewed v1.9 compatibility overlay
+
+MikroMCP v1.9's generic REST `update()` always builds `PATCH path/<id>`. RouterOS singleton menus
+such as `/ip/dns` do not expose a `.id`, so `manage_dns_settings` reaches
+`PATCH /rest/ip/dns/undefined` and fails with HTTP 500. mth leaves the submodule untouched and
+creates an ignored copy of the built bundle named `dist/mth-main.js`. In that copy only, an update
+with an ID remains a PATCH while an ID-less update uses RouterOS's typed `POST path/set` command.
+The transformation matches one exact reviewed source fragment and refuses to start if a future
+bundle differs. Remove this overlay after pinning an upstream release that implements singleton
+updates itself.
