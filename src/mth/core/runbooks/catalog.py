@@ -13,8 +13,10 @@ from mth.core.runbooks.base import (
     ToolSession,
 )
 from mth.core.runbooks.extended import (
+    AddressListEntryDefinition,
     DhcpServerDefinition,
     DnsResolverDefinition,
+    IpAddressDefinition,
     WireGuardPeerDefinition,
 )
 
@@ -640,6 +642,8 @@ DEFAULT_RUNBOOK_REGISTRY = RunbookRegistry(
     (
         WanPppoeDefinition(),
         LanBridgeDefinition(),
+        IpAddressDefinition(),
+        AddressListEntryDefinition(),
         DhcpServerDefinition(),
         DnsResolverDefinition(),
         WanNatDefinition(),

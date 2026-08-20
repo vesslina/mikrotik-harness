@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from typing import Protocol
 
 from textual import work
@@ -218,14 +219,18 @@ class DiscoveryApp(App[None]):
     def clipboard(self) -> str:
         """Prefer the OS clipboard when a terminal sends Ctrl+V as a key."""
 
-        system_value = system_clipboard.read_text()
+        try:
+            system_value = system_clipboard.read_text()
+        except (OSError, ValueError):
+            system_value = None
         return super().clipboard if system_value is None else system_value
 
     def copy_to_clipboard(self, text: str) -> None:
         """Keep Textual's OSC52 clipboard and the Windows clipboard in sync."""
 
         super().copy_to_clipboard(text)
-        system_clipboard.write_text(text)
+        with suppress(OSError, ValueError):
+            system_clipboard.write_text(text)
 
     def compose(self) -> ComposeResult:
         yield Header()

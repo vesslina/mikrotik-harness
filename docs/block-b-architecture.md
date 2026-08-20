@@ -4,7 +4,7 @@
 
 Block A is complete and the second major Block B pass is operational. A connected model can read
 live RouterOS state through a bounded capability pack, explain the result, and hand a supported
-change request to one of seven deterministic runbooks. The model never executes a write itself.
+change request to one of nine deterministic runbooks. The model never executes a write itself.
 
 Implemented runbooks after Pass 2:
 
@@ -12,6 +12,8 @@ Implemented runbooks after Pass 2:
 | --- | --- | --- |
 | `/pppoe` | WAN PPPoE client | `manage_pppoe_client` |
 | `/bridge` | LAN bridge and member ports | `manage_bridge`, `manage_bridge_port` |
+| `/ip-address` | Add an IPv4 address to an interface | `manage_ip_address` |
+| `/address-list` | Add a firewall address-list entry | `manage_address_list_entry` |
 | `/dhcp` | IP pool and DHCP server core | `manage_ip_pool`, `manage_dhcp_server` |
 | `/dns` | RouterOS DNS resolver | `manage_dns_settings` |
 | `/nat` | WAN source-NAT masquerade | `manage_firewall_rule` |
@@ -19,8 +21,21 @@ Implemented runbooks after Pass 2:
 | `/wireguard` | WireGuard interface and one peer | `manage_wireguard_interface`, `manage_wireguard_peer` |
 
 The rest of the context catalog is intentionally not represented as direct model tools where the
-pinned backend cannot express the complete operation safely. New change capability is added by
-registering another reviewed `RunbookDefinition`, not by relaxing the agent boundary.
+pinned backend cannot express the complete operation safely. New scenario capability is added by
+registering another reviewed `RunbookDefinition`; generic capability requires an explicit review
+and allowlist entry, not a relaxation of the agent boundary.
+
+READY additionally exposes a runtime typed-change layer for 25 reviewed MikroMCP write tools.
+For each selected capability domain, mth intersects a security allowlist with the live
+`tools/list` response, copies the original JSON schema into a local `propose_typed_*` tool, and
+removes `routerId`, `dryRun`, and confirmation fields. The underlying `manage_*` tool is never
+given to the model. A proposal becomes a one-step runbook and follows the same dry-run,
+confirmation-token, snapshot, journal, verification, history, and rollback lifecycle.
+
+The generic layer deliberately excludes raw commands, reboot/upgrade, scripts and scheduler
+payloads, file writes, containers, SwOS blobs, and tools containing passwords/private secrets.
+Those require a dedicated workflow with stronger UI and verification; a broad approval button is
+not treated as sufficient authorization for arbitrary code or an irreversible operation.
 
 ## Dependency and runtime
 
@@ -36,7 +51,7 @@ Textual chat
   -> provider-neutral agent loop
        -> local capability selector
        -> filtered live MikroMCP read tools
-       -> local propose_* handoff
+       -> local scenario propose_* or schema-derived propose_typed_* handoff
             -> schema-driven runbook wizard
             -> RunbookExecutor
                  -> capture projected baseline
@@ -75,6 +90,11 @@ read tools in the 122-tool catalog; individual packs contained 7–18 tools.
 Every real call is rebound to the connected `routerId`. Fleet-global tools, management tools,
 `apply_plan`, and `run_command` never reach the model. Device output is treated as untrusted data
 and recursively redacted before it enters either model context or normalized UI events.
+
+After apply and deterministic verification, the provider is called once more with tools disabled.
+It receives only the approved plan summary, verified/unverified status, operational status, and
+whether a rollback journal exists, then produces a 2–5 sentence user-facing report. Failure of
+this optional reporting call cannot change or hide the backend result.
 
 ## Universal runbook lifecycle
 

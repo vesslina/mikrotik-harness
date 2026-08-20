@@ -9,12 +9,40 @@ CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 
 
+def _configure_windows_api(user32: ctypes.WinDLL, kernel32: ctypes.WinDLL) -> None:
+    """Declare pointer-sized Win32 clipboard signatures for 64-bit Python."""
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+
 def _windows_libraries() -> tuple[ctypes.WinDLL, ctypes.WinDLL] | None:
     if os.name != "nt":
         return None
-    return ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL(
+    libraries = ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL(
         "kernel32", use_last_error=True
     )
+    _configure_windows_api(*libraries)
+    return libraries
 
 
 def _open(user32: ctypes.WinDLL) -> bool:
@@ -32,9 +60,11 @@ def read_text() -> str | None:
     if libraries is None:
         return None
     user32, kernel32 = libraries
-    user32.GetClipboardData.restype = wintypes.HANDLE
-    kernel32.GlobalLock.restype = wintypes.LPVOID
-    if not _open(user32):
+    try:
+        opened = _open(user32)
+    except (OSError, ctypes.ArgumentError, ValueError):
+        return None
+    if not opened:
         return None
     handle: int | None = None
     pointer: int | None = None
@@ -48,10 +78,14 @@ def read_text() -> str | None:
         if not pointer:
             return None
         return ctypes.wstring_at(pointer)
+    except (OSError, ctypes.ArgumentError, ValueError):
+        return None
     finally:
-        if pointer and handle:
-            kernel32.GlobalUnlock(handle)
-        user32.CloseClipboard()
+        try:
+            if pointer and handle:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
 
 
 def write_text(text: str) -> bool:
@@ -61,10 +95,11 @@ def write_text(text: str) -> bool:
     if libraries is None:
         return False
     user32, kernel32 = libraries
-    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-    kernel32.GlobalLock.restype = wintypes.LPVOID
-    user32.SetClipboardData.restype = wintypes.HANDLE
-    if not _open(user32):
+    try:
+        opened = _open(user32)
+    except (OSError, ctypes.ArgumentError, ValueError):
+        return False
+    if not opened:
         return False
     handle: int | None = None
     transferred = False
@@ -86,7 +121,11 @@ def write_text(text: str) -> bool:
             return False
         transferred = True
         return True
+    except (OSError, ctypes.ArgumentError, ValueError):
+        return False
     finally:
-        user32.CloseClipboard()
-        if handle and not transferred:
-            kernel32.GlobalFree(handle)
+        try:
+            user32.CloseClipboard()
+        finally:
+            if handle and not transferred:
+                kernel32.GlobalFree(handle)

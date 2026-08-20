@@ -6,9 +6,11 @@ import pytest
 
 from mth.core.mcp_client import McpToolResult
 from mth.core.runbooks import (
+    AddressListEntryDefinition,
     AdminServicesDefinition,
     DhcpServerDefinition,
     DnsResolverDefinition,
+    IpAddressDefinition,
     LanBridgeDefinition,
     RunbookDefinition,
     RunbookError,
@@ -361,6 +363,55 @@ def test_dns_and_wireguard_build_only_pinned_typed_tool_arguments() -> None:
                 "publicKey": public_key,
                 "allowedAddress": "not-a-network",
             }
+        )
+
+
+def test_ip_address_and_firewall_address_list_build_distinct_typed_steps() -> None:
+    ip_definition = IpAddressDefinition()
+    ip_submission = ip_definition.parse_submission(
+        {
+            "address": "192.168.1.33/24",
+            "interface": "bridge-lan",
+            "comment": "LAN gateway",
+        }
+    )
+    ip_step = ip_definition.build_steps(ip_submission.values)[0]
+
+    assert ip_step.tool == "manage_ip_address"
+    assert ip_step.params == {
+        "action": "add",
+        "address": "192.168.1.33/24",
+        "interface": "bridge-lan",
+        "disabled": False,
+        "comment": "LAN gateway",
+    }
+
+    list_definition = AddressListEntryDefinition()
+    list_submission = list_definition.parse_submission(
+        {
+            "list": "trusted-admins",
+            "address": "192.168.1.33/32",
+            "comment": "operator workstation",
+            "timeout": "1d",
+        }
+    )
+    list_step = list_definition.build_steps(list_submission.values)[0]
+
+    assert list_step.tool == "manage_address_list_entry"
+    assert list_step.params == {
+        "action": "add",
+        "list": "trusted-admins",
+        "address": "192.168.1.33/32",
+        "comment": "operator workstation",
+        "timeout": "1d",
+    }
+    with pytest.raises(ValueError, match="IPv4"):
+        ip_definition.parse_submission(
+            {"address": "not-an-address", "interface": "bridge-lan"}
+        )
+    with pytest.raises(ValueError, match="IPv4"):
+        list_definition.parse_submission(
+            {"list": "trusted-admins", "address": "2001:db8::1/128"}
         )
 
 

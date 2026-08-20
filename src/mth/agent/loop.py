@@ -33,7 +33,13 @@ from mth.agent.providers import (
 from mth.agent.redaction import redact_tool_result
 from mth.agent.tool_catalog import ToolCatalogRouter
 from mth.core.mcp_client.models import McpTool, McpToolResult
-from mth.core.runbooks import DEFAULT_RUNBOOK_REGISTRY, RunbookRegistry
+from mth.core.runbooks import (
+    DEFAULT_RUNBOOK_REGISTRY,
+    RunbookApplyResult,
+    RunbookPlan,
+    RunbookRegistry,
+    typed_definition_for_proposal,
+)
 
 
 class AgentMode(StrEnum):
@@ -210,8 +216,19 @@ class ReadOnlyAgentLoop:
                     tools = selection.tools
                     continue
                 definition = self._runbooks.for_proposal(call.name)
+                if definition is None:
+                    definition = typed_definition_for_proposal(catalog, call.name)
                 if definition is not None:
-                    parameters = definition.sanitize_proposal(call.arguments)
+                    try:
+                        parameters = definition.sanitize_proposal(call.arguments)
+                    except ValueError as error:
+                        events.append(
+                            FinalSummary(
+                                f"Blocked invalid typed change proposal: {error}",
+                                FinalOutcome.STOPPED,
+                            )
+                        )
+                        return tuple(events)
                     proposal = RunbookProposal(
                         runbook=definition.id,
                         parameters=cast(dict[str, JsonValue], parameters),
@@ -272,6 +289,57 @@ class ReadOnlyAgentLoop:
         summary = "Stopped after the maximum number of read-only tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
         return tuple(events)
+
+    async def report_change(
+        self,
+        plan: RunbookPlan,
+        result: RunbookApplyResult,
+    ) -> tuple[AgentEvent, ...]:
+        """Ask the selected model for a short post-apply report with no tools available."""
+
+        status = "verified" if result.verified else "not verified"
+        operational = (
+            "active"
+            if result.operational is True
+            else "inactive"
+            if result.operational is False
+            else "not checked"
+        )
+        evidence = {
+            "change": plan.title,
+            "approvedPlan": plan.summary,
+            "status": status,
+            "operationalState": operational,
+            "verification": result.verification.details,
+            "rollbackAvailable": bool(result.journal_ids),
+        }
+        reply = await self._provider.complete(
+            (
+                {
+                    "role": "system",
+                    "content": (
+                        "Write a concise user-facing report after an approved RouterOS change. "
+                        "Use the language of approvedPlan. State what changed, whether "
+                        "verification passed, and whether rollback is available. Do not invent "
+                        "facts, commands, "
+                        "or additional changes. Use 2-5 short sentences."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(evidence, ensure_ascii=False),
+                },
+            ),
+            (),
+        )
+        text = reply.content.strip() or self._recover_final_answer(reply.reasoning)
+        if not text:
+            return ()
+        self._remember(f"Approved change: {plan.summary}", text)
+        return (
+            AgentMessage(text),
+            FinalSummary(text, FinalOutcome.COMPLETED),
+        )
 
     def _progress(self, events: list[AgentEvent], event: AgentEvent) -> None:
         events.append(event)
@@ -391,7 +459,9 @@ class ReadOnlyAgentLoop:
                 "READY mode is active. Before reading live state or proposing a change, call "
                 "select_router_capabilities with the relevant domain(s). Then use the supplied "
                 "read-only tools or a propose_* runbook tool. Proposal tools only open a human "
-                "form; they never write RouterOS."
+                "approval workflow; they never write RouterOS by themselves. After an approved "
+                "change, give the user a brief report of what changed and whether verification "
+                "passed."
             )
         )
         return (

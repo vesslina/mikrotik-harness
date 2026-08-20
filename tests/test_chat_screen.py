@@ -303,6 +303,38 @@ def test_transcript_is_selectable_and_can_be_copied(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_transcript_double_click_target_selects_one_token(tmp_path) -> None:
+    async def scenario() -> None:
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=ProviderPresetStore(
+                PresetPaths(file=tmp_path / "providers.json")
+            ),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen._write_system("Address 192.168.1.33/24 on bridge-lan")
+            await pilot.pause()
+            transcript = screen.query_one("#transcript")
+            line_index = next(
+                index
+                for index, line in enumerate(transcript.lines)
+                if "192.168.1.33/24" in line.text
+            )
+            line = transcript.lines[line_index].text
+            selection = transcript.word_selection_at(
+                Offset(line.index("192.168.1.33/24") + 3, line_index)
+            )
+
+            assert selection is not None
+            assert selection.extract(transcript.plain_text()) == "192.168.1.33/24"
+
+    asyncio.run(scenario())
+
+
 def test_slash_command_hints_filter_and_tab_completes(tmp_path) -> None:
     async def scenario() -> None:
         screen = _screen(
@@ -376,12 +408,26 @@ def test_models_command_opens_picker_and_activates_saved_model(tmp_path) -> None
 
 def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_path) -> None:
     async def scenario() -> None:
+        class ReportingAgent(_Runner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reports = 0
+
+            async def report_change(self, plan, result):
+                assert plan.title == "WAN PPPoE"
+                assert result.verified is True
+                self.reports += 1
+                return (AgentMessage("PPPoE applied, verified, and ready to roll back."),)
+
         runner = _RunbookRunner()
+        agent = ReportingAgent()
+        preset_store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        preset_store.save(_preset())
         screen = _screen(
             _profile(),
             _registration(),
-            preset_store=ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json")),
-            agent_factory=lambda _preset, _key: _Runner(),
+            preset_store=preset_store,
+            agent_factory=lambda _preset, _key: agent,
             runbook_factory=lambda _definition: runner,
             history_store=RunbookHistoryStore(
                 RunbookHistoryPaths(file=tmp_path / "runbooks.json")
@@ -428,6 +474,10 @@ def test_pppoe_command_requires_ready_then_approves_applies_and_rolls_back(tmp_p
 
             assert isinstance(app.screen, ChatScreen)
             assert runner.applied_password == "isp-secret"
+            assert agent.reports == 1
+            assert "PPPoE applied, verified" in screen.query_one(
+                "#transcript"
+            ).plain_text()
             prompt.value = "/rollback journal-1"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
@@ -488,6 +538,86 @@ def test_agent_pppoe_proposal_opens_prefilled_masked_runbook(tmp_path) -> None:
             assert screen.query_one("#inline-runbook-input-2", Input).value == "subscriber"
             assert screen.query_one("#inline-runbook-input-3", Input).value == ""
             assert screen.query_one("#inline-runbook-input-3", Input).password is True
+
+    asyncio.run(scenario())
+
+
+def test_agent_typed_proposal_goes_directly_to_dry_run_approval(tmp_path) -> None:
+    async def scenario() -> None:
+        class ProposalAgent:
+            async def run(self, prompt: str, mode: AgentMode):
+                assert mode is AgentMode.READY
+                return (
+                    RunbookProposal(
+                        "typed:manage_route",
+                        {
+                            "action": "add",
+                            "dstAddress": "10.20.0.0/16",
+                            "gateway": "192.0.2.1",
+                        },
+                    ),
+                    FinalSummary("Typed change proposed.", FinalOutcome.COMPLETED),
+                )
+
+        class TypedRunner:
+            def __init__(self, definition) -> None:
+                self.definition = definition
+
+            async def plan(self, submission):
+                assert submission.runbook_id == "typed:manage_route"
+                assert submission.values["arguments"]["gateway"] == "192.0.2.1"
+                return RunbookPlan(
+                    plan_id="typed-route-1",
+                    runbook_id=submission.runbook_id,
+                    title=self.definition.title,
+                    values=submission.values,
+                    baseline={"stateHash": "before"},
+                    steps=(
+                        RunbookStep(
+                            "manage_route",
+                            {
+                                "action": "add",
+                                "dstAddress": "10.20.0.0/16",
+                                "gateway": "192.0.2.1",
+                            },
+                        ),
+                    ),
+                    preview="Dry run: would add route",
+                    summary="Add route 10.20.0.0/16 via 192.0.2.1",
+                )
+
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        definitions = []
+
+        def factory(definition):
+            definitions.append(definition)
+            return TypedRunner(definition)
+
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: ProposalAgent(),
+            runbook_factory=factory,
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 45)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "Добавь маршрут 10.20.0.0/16 через 192.0.2.1"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert definitions[0].tool_name == "manage_route"
+            assert screen.query_one("#inline-runbook-view").display is False
+            assert screen.query_one("#inline-approval-view").display is True
+            assert "10.20.0.0/16" in str(
+                screen.query_one("#inline-approval-summary", Static).content
+            )
 
     asyncio.run(scenario())
 

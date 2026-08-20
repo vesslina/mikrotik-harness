@@ -91,6 +91,8 @@ def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_pa
     assert "manage_firewall_rule" in operator["allowedToolPatterns"]
     assert "manage_ip_service" in operator["allowedToolPatterns"]
     assert "manage_ip_pool" in operator["allowedToolPatterns"]
+    assert "manage_ip_address" in operator["allowedToolPatterns"]
+    assert "manage_address_list_entry" in operator["allowedToolPatterns"]
     assert "manage_dhcp_server" in operator["allowedToolPatterns"]
     assert "manage_dns_settings" in operator["allowedToolPatterns"]
     assert "manage_wireguard_interface" in operator["allowedToolPatterns"]

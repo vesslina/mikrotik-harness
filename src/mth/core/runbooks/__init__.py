@@ -24,8 +24,10 @@ from mth.core.runbooks.catalog import (
     WanPppoeDefinition,
 )
 from mth.core.runbooks.extended import (
+    AddressListEntryDefinition,
     DhcpServerDefinition,
     DnsResolverDefinition,
+    IpAddressDefinition,
     WireGuardPeerDefinition,
 )
 from mth.core.runbooks.history import (
@@ -43,13 +45,23 @@ from mth.core.runbooks.pppoe import (
     PppoeRunbookExecutor,
     PppoeSecret,
 )
+from mth.core.runbooks.typed import (
+    APPROVED_TYPED_CHANGE_DOMAINS,
+    TypedChangeDefinition,
+    is_approved_typed_change,
+    typed_definition_for_proposal,
+    typed_proposals_for_domains,
+)
 
 __all__ = [
     "DEFAULT_RUNBOOK_REGISTRY",
     "AdminServicesDefinition",
+    "APPROVED_TYPED_CHANGE_DOMAINS",
+    "AddressListEntryDefinition",
     "DhcpServerDefinition",
     "DnsResolverDefinition",
     "LanBridgeDefinition",
+    "IpAddressDefinition",
     "PppoeApplyResult",
     "PppoePlan",
     "PppoeRequest",
@@ -75,7 +87,11 @@ __all__ = [
     "RunbookStep",
     "RunbookSubmission",
     "RunbookVerification",
+    "TypedChangeDefinition",
     "WanNatDefinition",
     "WanPppoeDefinition",
     "WireGuardPeerDefinition",
+    "is_approved_typed_change",
+    "typed_definition_for_proposal",
+    "typed_proposals_for_domains",
 ]

@@ -22,6 +22,12 @@ from mth.agent import (
     ToolResult,
 )
 from mth.core.mcp_client.models import McpTool, McpToolResult
+from mth.core.runbooks import (
+    RunbookApplyResult,
+    RunbookPlan,
+    RunbookStep,
+    RunbookVerification,
+)
 
 
 def _preset() -> ProviderPreset:
@@ -116,6 +122,7 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
             "select_router_capabilities",
             "list_interfaces",
             "propose_lan_bridge",
+            "propose_ip_address",
         )
         assert provider.tool_names == [selector, selected, selected]
         assert backend.arguments == {"routerId": "mikrotik-afe23e"}
@@ -483,5 +490,124 @@ def test_pppoe_intent_becomes_harness_proposal_without_backend_write() -> None:
         assert proposal.parameters["username"] == "isp-user"
         assert "password" not in proposal.parameters
         assert backend.arguments is None
+
+    asyncio.run(scenario())
+
+
+def test_ready_loop_turns_live_write_schema_into_typed_proposal() -> None:
+    async def scenario() -> None:
+        class Backend:
+            async def list_tools(self):
+                return (McpTool(
+                    "manage_route",
+                    "Manage a static route.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "routerId": {"type": "string"},
+                            "action": {"type": "string"},
+                            "dstAddress": {"type": "string"},
+                            "gateway": {"type": "string"},
+                            "dryRun": {"type": "boolean"},
+                        },
+                        "required": ["routerId", "action", "dstAddress", "gateway"],
+                    },
+                    {"readOnlyHint": False, "destructiveHint": True},
+                ),)
+
+            async def call_tool(self, name, arguments=None):
+                raise AssertionError("A proposal must not call the backend write tool")
+
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, tools=()):
+                self.calls += 1
+                if self.calls == 1:
+                    return ProviderReply(
+                        "",
+                        (
+                            ProviderToolCall(
+                                "select-1",
+                                "select_router_capabilities",
+                                {"domains": ["firewall_routing"]},
+                            ),
+                        ),
+                    )
+                names = {tool.name for tool in tools}
+                assert "manage_route" not in names
+                assert "propose_typed_manage_route" in names
+                proposal = next(
+                    tool for tool in tools if tool.name == "propose_typed_manage_route"
+                )
+                assert "routerId" not in proposal.input_schema["properties"]
+                return ProviderReply(
+                    "",
+                    (
+                        ProviderToolCall(
+                            "proposal-1",
+                            "propose_typed_manage_route",
+                            {
+                                "action": "add",
+                                "dstAddress": "10.20.0.0/16",
+                                "gateway": "192.0.2.1",
+                            },
+                        ),
+                    ),
+                )
+
+        events = await ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=Backend(),
+            router_id="mikrotik-afe23e",
+        ).run("Add a route", AgentMode.READY)
+
+        proposal = next(event for event in events if isinstance(event, RunbookProposal))
+        assert proposal.runbook == "typed:manage_route"
+        assert proposal.parameters["gateway"] == "192.0.2.1"
+
+    asyncio.run(scenario())
+
+
+def test_agent_writes_short_report_after_approved_change() -> None:
+    async def scenario() -> None:
+        class Provider:
+            async def complete(self, messages, tools=()):
+                assert not tools
+                evidence = json.loads(messages[-1]["content"])
+                assert evidence["status"] == "verified"
+                assert evidence["rollbackAvailable"] is True
+                return ProviderReply(
+                    "Маршрут добавлен и проверен. При необходимости доступен rollback.", ()
+                )
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+        )
+        plan = RunbookPlan(
+            plan_id="route-1",
+            runbook_id="typed:manage_route",
+            title="Manage route",
+            values={},
+            baseline={},
+            steps=(RunbookStep("manage_route", {"action": "add"}),),
+            preview="dry run",
+            summary="Добавить маршрут 10.20.0.0/16.",
+        )
+        result = RunbookApplyResult(
+            journal_ids=("journal-1",),
+            verification=RunbookVerification(True, "Route is present."),
+            backend_summary="Applied.",
+        )
+
+        events = await loop.report_change(plan, result)
+
+        assert isinstance(events[0], AgentMessage)
+        assert "добавлен" in events[0].text
 
     asyncio.run(scenario())

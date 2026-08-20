@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -9,10 +10,11 @@ from typing import Protocol
 
 from rich.padding import Padding
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Offset
 from textual.screen import ModalScreen, Screen
 from textual.selection import Selection
 from textual.strip import Strip
@@ -60,6 +62,7 @@ from mth.core.runbooks import (
     RunbookRollbackPreview,
     RunbookRollbackResult,
     RunbookSubmission,
+    TypedChangeDefinition,
 )
 from mth.ui.textual.i18n import (
     THINKING_PHRASES,
@@ -132,6 +135,8 @@ class RunbookSelection:
 class TranscriptLog(RichLog):
     """A RichLog with real mouse selection and clipboard extraction."""
 
+    _WORD_CHARACTER = re.compile(r"[\w./:@+\-]", re.UNICODE)
+
     def plain_text(self) -> str:
         return "\n".join(line.text.rstrip() for line in self.lines).rstrip()
 
@@ -141,6 +146,38 @@ class TranscriptLog(RichLog):
     def selection_updated(self, selection: Selection | None) -> None:
         self._line_cache.clear()
         self.refresh()
+
+    def word_selection_at(self, offset: Offset) -> Selection | None:
+        """Return the word-like token at a transcript cell for double-click selection."""
+
+        if offset.y < 0 or offset.y >= len(self.lines):
+            return None
+        line = self.lines[offset.y].text.rstrip()
+        if not line:
+            return None
+        index = min(max(offset.x, 0), len(line) - 1)
+        if self._WORD_CHARACTER.fullmatch(line[index]) is None:
+            return None
+        start = index
+        end = index + 1
+        while start and self._WORD_CHARACTER.fullmatch(line[start - 1]) is not None:
+            start -= 1
+        while end < len(line) and self._WORD_CHARACTER.fullmatch(line[end]) is not None:
+            end += 1
+        return Selection.from_offsets(Offset(start, offset.y), Offset(end, offset.y))
+
+    def on_click(self, event: events.Click) -> None:
+        """Make double-click select one token instead of Textual's whole-widget default."""
+
+        if event.chain != 2:
+            return
+        widget, offset = self.screen.get_widget_and_offset_at(event.screen_x, event.screen_y)
+        if widget is not self or offset is None:
+            return
+        selection = self.word_selection_at(offset)
+        if selection is not None:
+            self.screen.selections = {self: selection}
+            event.stop()
 
     def _render_line(self, y: int, scroll_x: int, width: int) -> Strip:
         selection = self.text_selection
@@ -601,6 +638,8 @@ class ChatScreen(Screen[None]):
         ("/language", "language"),
         ("/pppoe", "pppoe"),
         ("/bridge", "bridge"),
+        ("/ip-address", "ip-address"),
+        ("/address-list", "address-list"),
         ("/dhcp", "dhcp"),
         ("/dns", "dns"),
         ("/nat", "nat"),
@@ -620,6 +659,14 @@ class ChatScreen(Screen[None]):
         "language": ("change interface language", "изменить язык интерфейса"),
         "pppoe": ("configure WAN PPPoE safely", "безопасно настроить WAN PPPoE"),
         "bridge": ("create a LAN bridge safely", "безопасно создать LAN bridge"),
+        "ip-address": (
+            "assign an IPv4 address to an interface",
+            "назначить IPv4-адрес интерфейсу",
+        ),
+        "address-list": (
+            "add a firewall address-list entry",
+            "добавить запись в firewall address-list",
+        ),
         "dhcp": ("create a DHCP pool and server", "создать DHCP pool и server"),
         "dns": ("configure DNS resolver", "настроить DNS resolver"),
         "nat": ("configure WAN masquerade", "настроить WAN masquerade"),
@@ -643,6 +690,9 @@ class ChatScreen(Screen[None]):
         "Member interfaces": "Интерфейсы bridge",
         "Comment": "Комментарий",
         "Create disabled": "Создать отключённым",
+        "IPv4 address/CIDR": "IPv4-адрес/CIDR",
+        "Address-list name": "Имя address-list",
+        "Timeout": "Срок действия",
         "DHCP server name": "Имя DHCP server",
         "LAN interface": "LAN-интерфейс",
         "Pool name": "Имя pool",
@@ -667,7 +717,6 @@ class ChatScreen(Screen[None]):
         Binding("tab", "cycle_mode", "Cycle mode", show=False, priority=True),
         Binding("escape", "cancel_interaction", "Cancel", show=False, priority=True),
         Binding("ctrl+o", "tool_details", "Tool details", show=False),
-        Binding("ctrl+shift+c", "copy_transcript", "Copy transcript", show=False),
         Binding("ctrl+l", "clear_chat", "Clear", show=False),
     ]
 
@@ -1301,7 +1350,7 @@ class ChatScreen(Screen[None]):
         if command == "/help":
             self._write_system(
                 "/help  /info  /model  /models [name]  /language [en|ru]  "
-                "/pppoe  /bridge  /dhcp  /dns  "
+                "/pppoe  /bridge  /ip-address  /address-list  /dhcp  /dns  "
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
                 "/log  /copy  /clear  /exit\n"
                 + (
@@ -1496,7 +1545,24 @@ class ChatScreen(Screen[None]):
         definition: RunbookDefinition,
         proposal: RunbookProposal | None = None,
     ) -> None:
+        if isinstance(definition, TypedChangeDefinition):
+            if proposal is None:
+                self._write_system("Typed changes must originate from the agent.", error=True)
+                return
+            self._plan_runbook(
+                RunbookSelection(definition.submission(proposal.parameters))
+            )
+            return
         self._show_runbook_form(definition, proposal)
+
+    def _definition_for_id(self, runbook_id: str) -> RunbookDefinition:
+        try:
+            return self._runbooks.get(runbook_id)
+        except KeyError:
+            prefix = "typed:"
+            if runbook_id.startswith(prefix):
+                return TypedChangeDefinition.from_history(runbook_id[len(prefix) :])
+            raise
 
     def _runbook_selected(self, selection: RunbookSelection | None) -> None:
         if selection is None:
@@ -1505,7 +1571,7 @@ class ChatScreen(Screen[None]):
 
     @work(exclusive=True, group="runbook", exit_on_error=False)
     async def _plan_runbook(self, selection: RunbookSelection) -> None:
-        definition = self._runbooks.get(selection.submission.runbook_id)
+        definition = self._definition_for_id(selection.submission.runbook_id)
         self.query_one("#chat-input", Input).disabled = True
         self.query_one("#mode-line", Static).update(
             f"◌ Building {definition.title} dry-run plan…"
@@ -1541,6 +1607,13 @@ class ChatScreen(Screen[None]):
         draft = self._runbook_draft
         self._pending_runbook = None
         if pending is None:
+            return
+        if isinstance(pending[0].definition, TypedChangeDefinition):
+            self._write_system(
+                "Typed proposal cancelled for amendment. Describe the corrected values "
+                "to the agent so it can submit a new schema-validated proposal."
+            )
+            self.query_one("#chat-input", Input).focus()
             return
         self._show_runbook_form(pending[0].definition, draft=draft)
 
@@ -1607,12 +1680,33 @@ class ChatScreen(Screen[None]):
             if result.journal_ids:
                 message += f"Use /rollback {plan.plan_id} to undo the complete runbook."
             self._write_system(message, error=not result.verified)
+            await self._report_applied_change(plan, result)
         finally:
             self._pending_runbook = None
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_mode()
+
+    async def _report_applied_change(
+        self, plan: RunbookPlan, result: RunbookApplyResult
+    ) -> None:
+        agent = self._agent
+        report_change = getattr(agent, "report_change", None)
+        if not callable(report_change):
+            return
+        self._start_activity()
+        try:
+            events = await report_change(plan, result)
+        except ProviderError as error:
+            self._write_system(f"Post-change report failed — {error.code}: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"Post-change report failed: {error}", error=True)
+        else:
+            for event in events:
+                self._render_event(event)
+        finally:
+            self._stop_activity()
 
     def _start_rollback(self, token: str) -> None:
         if self._mode is not AgentMode.READY:
@@ -1630,7 +1724,7 @@ class ChatScreen(Screen[None]):
             )
             return
         try:
-            definition = self._runbooks.get(record.plan.runbook_id)
+            definition = self._definition_for_id(record.plan.runbook_id)
         except KeyError:
             self._write_system(
                 f"Runbook definition is unavailable: {record.plan.runbook_id}", error=True
@@ -1744,7 +1838,7 @@ class ChatScreen(Screen[None]):
                 self._render_event(event)
             if proposal is not None:
                 try:
-                    definition = self._runbooks.get(proposal.runbook)
+                    definition = self._definition_for_id(proposal.runbook)
                 except KeyError:
                     self._write_system(
                         f"Unknown runbook proposal: {proposal.runbook}", error=True
@@ -1832,12 +1926,12 @@ class ChatScreen(Screen[None]):
             log.write(Text(f"    ↳ {status}", style=style))
         elif isinstance(event, RunbookProposal):
             try:
-                title = self._runbooks.get(event.runbook).title
+                title = self._definition_for_id(event.runbook).title
             except KeyError:
                 title = event.runbook
             log.write(
                 Text(
-                    f"  ↳ {title} proposal ready · opening editable approval form",
+                    f"  ↳ {title} proposal ready · opening approval workflow",
                     style="#ffb454",
                 )
             )

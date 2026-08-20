@@ -47,7 +47,16 @@ def test_capability_packs_route_representative_live_tools_and_proposals() -> Non
     addressing_names = {
         tool.name for tool in router.select(catalog, ["addressing_services"]).tools
     }
-    assert {"propose_lan_dhcp", "propose_dns_resolver"} <= addressing_names
+    assert {
+        "propose_lan_dhcp",
+        "propose_dns_resolver",
+        "propose_ip_address",
+    } <= addressing_names
+
+    firewall_names = {
+        tool.name for tool in router.select(catalog, ["firewall_routing"]).tools
+    }
+    assert "propose_address_list_entry" in firewall_names
 
 
 def test_capability_router_rejects_global_write_and_misannotated_tools() -> None:

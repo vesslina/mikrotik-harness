@@ -9,6 +9,7 @@ from mth.core.runbooks import (
     DEFAULT_RUNBOOK_REGISTRY,
     RunbookDefinition,
     RunbookRegistry,
+    typed_proposals_for_domains,
 )
 
 CAPABILITY_DOMAINS = (
@@ -84,9 +85,10 @@ class ToolCatalogRouter:
             for definition in self.registry.all()
             if definition.capability_domains.intersection(domains)
         )
+        typed_proposals = typed_proposals_for_domains(tuple(catalog), domains)
         return CapabilitySelection(
             domains=domains,
-            tools=(self.selector_tool, *selected, *proposal_tools),
+            tools=(self.selector_tool, *selected, *proposal_tools, *typed_proposals),
         )
 
     @classmethod

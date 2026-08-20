@@ -88,18 +88,27 @@ classic Claude Code wordmark while retaining the harness's black, white, and red
   encrypted API key can be deleted there; `/models <name>` remains a direct activation shortcut.
 - `/language` opens the inline English/Russian selector; `/language en` and `/language ru` switch
   directly. The first launch follows the operating-system locale and the choice is persisted.
-- `/pppoe`, `/bridge`, `/dhcp`, `/dns`, `/nat`, `/services`, and `/wireguard` open schema-driven
+- `/pppoe`, `/bridge`, `/ip-address`, `/address-list`, `/dhcp`, `/dns`, `/nat`, `/services`, and `/wireguard` open schema-driven
   runbook wizards in READY mode. DHCP currently creates the pool and server only after the
   operator confirms that the matching RouterOS network/gateway entry already exists.
 - Natural-language change requests can call the matching harness-owned `propose_*` handoff.
   These calls only open an editable form; the model never receives a backend write tool and
   cannot bypass dry-run, human approval, MikroMCP confirmation, post-check, or rollback.
+- READY capability packs also derive `propose_typed_*` tools from 25 reviewed live MikroMCP
+  schemas. These cover additional reversible configuration such as routes, VLAN/VRRP, queues,
+  DHCP clients/static leases, DNS entries, firewall/mangle rules, policy routing, NTP/netwatch,
+  logging, and PPP profiles. mth still owns router binding, dry-run, approval, apply,
+  verification, history, and rollback.
+- After an approved apply, the selected model receives only the approved plan and verification
+  outcome and writes a short user-facing completion report. The deterministic backend result
+  remains visible as the source of truth if the provider is unavailable.
 - `/rollback [execution-id|journal-id]` previews and confirms rollback of the complete runbook.
   History is stored without secrets under `.mth/runbook-history.json`, so rollback still works
   after restarting `mth`. Omitting the ID selects the most recent eligible execution.
 - `/help`, `/info`, `/log`, `/copy`, `/clear`, and `/exit` provide the remaining command surface.
-  `/copy` or `Ctrl+Shift+C` copies the complete transcript; `/clear` clears both the visible
-  transcript and the model's in-process conversation memory.
+  `/copy` copies the complete transcript; terminal-native selection/`Ctrl+Shift+C` copies only
+  the selected fragment. `/clear` clears both the visible transcript and the model's in-process
+  conversation memory.
 - Typing `/` shows matching commands below the composer; a unique prefix can be completed with
   `Tab`.
 - Model setup, saved-model selection, runbook forms, deletion, apply, rollback, and language
@@ -107,9 +116,9 @@ classic Claude Code wordmark while retaining the harness's black, white, and red
   transcript. `Esc` cancels and `Tab` returns an approval to editable parameters.
 - `Tab` cycles between `PLAN` and `READY`. PLAN does not start MikroMCP or expose tools. READY
   first exposes one local capability selector; the model then receives only the small live
-  read-only domain pack relevant to the request. Writes are reachable only through reviewed
-  deterministic runbooks and their approval UI. Fleet-global tools and `run_command` remain
-  excluded.
+  domain pack relevant to the request. Writes are reachable only through reviewed scenario
+  runbooks or schema-derived typed proposals and their approval UI. Fleet-global tools,
+  `run_command`, arbitrary-code tools, and irreversible operations remain excluded.
 
 An API key entered in `/model` is saved separately from preset metadata in the encrypted
 `.mth/provider-secrets.json` vault. Windows current-user DPAPI is preferred; if DPAPI is not

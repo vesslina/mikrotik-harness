@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Iterable, Mapping
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address, ip_interface, ip_network
 from typing import Any
 
 from mth.core.mcp_client import McpToolResult
@@ -67,6 +67,241 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().casefold() in {"true", "yes", "1", "enabled"}
+
+
+class IpAddressDefinition(RunbookDefinition):
+    """Assign one IPv4 address to an existing RouterOS interface."""
+
+    id = "ip_address"
+    title = "Interface IP address"
+    command = "/ip-address"
+    description = "Add an IPv4 address to an existing RouterOS interface."
+    proposal_tool_name = "propose_ip_address"
+    proposal_description = (
+        "Propose the approval-bound runbook that adds an IPv4 address/CIDR to an "
+        "existing RouterOS interface. Use this for /ip address, not a firewall address list."
+    )
+    fields = (
+        RunbookField(
+            "address",
+            "IPv4 address/CIDR",
+            required=True,
+            default="192.168.88.1/24",
+            description="IPv4 interface address in CIDR notation, for example 192.168.1.33/24",
+        ),
+        RunbookField(
+            "interface",
+            "Interface name",
+            required=True,
+            default="bridge-lan",
+            description="Existing RouterOS interface that will receive the address",
+        ),
+        RunbookField("comment", "Comment", default="Managed by mth", max_length=255),
+        RunbookField(
+            "disabled",
+            "Create disabled",
+            kind=RunbookFieldKind.BOOLEAN,
+            default=False,
+        ),
+    )
+    write_tools = frozenset({"manage_ip_address"})
+    capability_domains = frozenset({"addressing_services", "interfaces"})
+
+    def validate(self, values: Mapping[str, Any]) -> None:
+        try:
+            address = ip_interface(_string(values, "address"))
+        except ValueError as error:
+            raise ValueError("IPv4 address must use valid CIDR notation") from error
+        if address.version != 4:
+            raise ValueError("This runbook currently supports IPv4 addresses only")
+
+    def build_steps(
+        self,
+        values: Mapping[str, Any],
+        secrets: Mapping[str, str] | None = None,
+    ) -> tuple[RunbookStep, ...]:
+        del secrets
+        params: dict[str, Any] = {
+            "action": "add",
+            "address": _string(values, "address"),
+            "interface": _string(values, "interface"),
+            "disabled": _boolean(values, "disabled"),
+        }
+        comment = _string(values, "comment")
+        if comment:
+            params["comment"] = comment
+        return (RunbookStep("manage_ip_address", params),)
+
+    def summary(self, values: Mapping[str, Any]) -> str:
+        state = "disabled" if _boolean(values, "disabled") else "enabled"
+        return (
+            f'Add {_string(values, "address")} to interface '
+            f'"{_string(values, "interface")}" ({state}).'
+        )
+
+    async def _present(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> bool:
+        params = dict(self.build_steps(values)[0].params)
+        result = await session.call_tool(
+            "manage_ip_address", {"routerId": router_id, **params, "dryRun": True}
+        )
+        if result.is_error:
+            raise RuntimeError(result.text or "Could not inspect the target IP address")
+        return (result.structured_content or {}).get("action") == "already_exists"
+
+    async def capture_baseline(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {"present": await self._present(session, router_id, values)}
+
+    async def verify_apply(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> RunbookVerification:
+        present = await self._present(session, router_id, values)
+        return RunbookVerification(
+            present,
+            "The approved IPv4 address is present on the target interface."
+            if present
+            else "The approved IPv4 address is absent after apply.",
+            present and not _boolean(values, "disabled"),
+        )
+
+    async def verify_rollback(
+        self,
+        session: ToolSession,
+        router_id: str,
+        values: Mapping[str, Any],
+        baseline: Mapping[str, Any],
+    ) -> RunbookVerification:
+        present = await self._present(session, router_id, values)
+        matches = present == (baseline.get("present") is True)
+        return RunbookVerification(
+            matches,
+            "The original IPv4 address state was restored."
+            if matches
+            else "IPv4 address rollback differs from the pre-change baseline.",
+        )
+
+
+class AddressListEntryDefinition(RunbookDefinition):
+    """Add one permanent or expiring IPv4 firewall address-list entry."""
+
+    id = "address_list_entry"
+    title = "Firewall address-list entry"
+    command = "/address-list"
+    description = "Add an IPv4 address or CIDR to a RouterOS firewall address list."
+    proposal_tool_name = "propose_address_list_entry"
+    proposal_description = (
+        "Propose the approval-bound runbook that adds an IPv4 address/CIDR to a RouterOS "
+        "firewall address list. This does not assign the address to an interface."
+    )
+    fields = (
+        RunbookField(
+            "list",
+            "Address-list name",
+            required=True,
+            default="managed-by-mth",
+        ),
+        RunbookField(
+            "address",
+            "IPv4 address/CIDR",
+            required=True,
+            default="192.168.1.33/32",
+        ),
+        RunbookField("comment", "Comment", default="Managed by mth", max_length=255),
+        RunbookField("timeout", "Timeout", placeholder="optional, for example 1d"),
+    )
+    write_tools = frozenset({"manage_address_list_entry"})
+    capability_domains = frozenset({"firewall_routing"})
+
+    def validate(self, values: Mapping[str, Any]) -> None:
+        try:
+            address = ip_network(_string(values, "address"), strict=False)
+        except ValueError as error:
+            raise ValueError("Address-list entry must be a valid IPv4 address or CIDR") from error
+        if address.version != 4:
+            raise ValueError("This runbook currently supports IPv4 address lists only")
+
+    def build_steps(
+        self,
+        values: Mapping[str, Any],
+        secrets: Mapping[str, str] | None = None,
+    ) -> tuple[RunbookStep, ...]:
+        del secrets
+        params: dict[str, Any] = {
+            "action": "add",
+            "list": _string(values, "list"),
+            "address": _string(values, "address"),
+        }
+        for field in ("comment", "timeout"):
+            value = _string(values, field)
+            if value:
+                params[field] = value
+        return (RunbookStep("manage_address_list_entry", params),)
+
+    def summary(self, values: Mapping[str, Any]) -> str:
+        return (
+            f'Add {_string(values, "address")} to firewall address list '
+            f'"{_string(values, "list")}".'
+        )
+
+    async def _current(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        result = await session.call_tool(
+            "list_address_list_entries",
+            {
+                "routerId": router_id,
+                "list": _string(values, "list"),
+                "address": _string(values, "address"),
+            },
+        )
+        return _matching(
+            _records(result, "entries"), "address", _string(values, "address")
+        )
+
+    async def capture_baseline(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        current = await self._current(session, router_id, values)
+        return {
+            "entry": _project(
+                current, ("list", "address", "timeout", "disabled", "comment")
+            )
+        }
+
+    async def verify_apply(
+        self, session: ToolSession, router_id: str, values: Mapping[str, Any]
+    ) -> RunbookVerification:
+        present = await self._current(session, router_id, values) is not None
+        return RunbookVerification(
+            present,
+            "The approved firewall address-list entry is present."
+            if present
+            else "The approved firewall address-list entry is absent after apply.",
+        )
+
+    async def verify_rollback(
+        self,
+        session: ToolSession,
+        router_id: str,
+        values: Mapping[str, Any],
+        baseline: Mapping[str, Any],
+    ) -> RunbookVerification:
+        current = await self._current(session, router_id, values)
+        before = baseline.get("entry")
+        matches = (before is None and current is None) or (
+            isinstance(before, dict)
+            and current is not None
+            and all(current.get(key) == value for key, value in before.items())
+        )
+        return RunbookVerification(
+            matches,
+            "The original firewall address-list state was restored."
+            if matches
+            else "Address-list rollback differs from the pre-change baseline.",
+        )
 
 
 class DhcpServerDefinition(RunbookDefinition):

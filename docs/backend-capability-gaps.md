@@ -6,9 +6,10 @@ because a similarly named backend tool exists.
 
 | Scenario | Exact gap | Harness decision |
 | --- | --- | --- |
+| Read all static interface addresses | v1.9 exposes `manage_ip_address`, but no dedicated `list_ip_addresses` tool. | `/ip-address` uses the typed tool's non-mutating `dryRun` probe for exact-target baseline and verification. The agent may add an approved address but must not claim it can enumerate every static address. |
 | Complete DHCP LAN | `manage_ip_pool` and `manage_dhcp_server` exist, but no typed mutation creates `/ip dhcp-server network` with gateway/DNS options. | `/dhcp` creates pool + server only after an operator confirms the matching network entry already exists. |
 | Wi-Fi SSID/password | `manage_wifi_interface` can set SSID/disabled state but exposes no security profile or passphrase. It also lacks the snapshot metadata required by the generic journal workflow. | No Wi-Fi runbook. Do not claim password configuration or rollback safety. |
-| Baseline firewall | `manage_firewall_rule` lacks important match fields such as connection state needed by a defensible baseline. Raw CLI would bypass the typed boundary; rollback also cannot restore rule order. | Keep read-only firewall inspection and NAT masquerade only. |
+| Baseline firewall | `manage_firewall_rule` lacks important match fields such as connection state needed by a defensible opinionated baseline. | READY may propose individual schema-supported firewall, mangle, and address-list changes through the typed approval gateway, but mth does not claim these constitute the complete baseline template from the original plan. |
 | Backup/export | `create_backup` and `export_config` are operational tools, not confirmation-token/journal-bound configuration changes. | Keep them outside the universal change runbook until an explicit artifact workflow and retention policy exist. |
 | SSH port/restriction | `manage_ip_service` deliberately excludes port changes to prevent lockout. `run_command` is only a best-effort guarded SSH escape hatch. | Manual operation only; `run_command` remains outside model RBAC. |
 | Wi-Fi validation on CHR | CHR has no physical radio or switch-chip behavior. | Validate Wi-Fi later on isolated physical hardware even after the typed backend gap is closed. |
