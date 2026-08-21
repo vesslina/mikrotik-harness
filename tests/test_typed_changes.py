@@ -132,3 +132,39 @@ def test_typed_change_uses_dry_run_for_baseline_apply_check_and_rollback_check()
         assert not session.states
 
     asyncio.run(scenario())
+
+
+def test_typed_remove_treats_not_found_post_check_as_verified_absence() -> None:
+    class Session:
+        async def call_tool(self, name, arguments=None):
+            return McpToolResult(
+                ("planned",),
+                {
+                    "steps": [
+                        {
+                            "currentState": [],
+                            "structuredDryRun": {
+                                "action": "would_fail",
+                                "error": "IP_ADDRESS_NOT_FOUND",
+                            },
+                            "dryRunResult": "IP address not found",
+                        }
+                    ]
+                },
+                False,
+            )
+
+    async def scenario() -> None:
+        definition = TypedChangeDefinition(_route_tool())
+        submission = definition.submission(
+            {
+                "action": "remove",
+                "dstAddress": "10.0.0.0/24",
+                "gateway": "192.0.2.1",
+            }
+        )
+        result = await definition.verify_apply(Session(), "router", submission.values)
+        assert result.passed is True
+        assert "absent" in result.details
+
+    asyncio.run(scenario())

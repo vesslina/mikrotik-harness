@@ -24,6 +24,11 @@ _SINGLETON_SAFE_UPDATE_METHOD = '''  async update(path, id, data) {
     }
   }'''
 _SINGLETON_MARKER = '`${this.baseUrl}/${path}/set`'
+_SNAPSHOT_RUNTIME_MARKER = '  "uptime"\n]);'
+_SNAPSHOT_RUNTIME_FIELDS = '''  "uptime",
+  "actual-interface",
+  "slave"
+]);'''
 
 
 def project_root() -> Path:
@@ -81,6 +86,13 @@ class MikroMcpRuntime:
             raise RuntimeUnavailableError(
                 "Pinned MikroMCP bundle has an unknown REST update implementation; "
                 "refusing to apply the mth singleton compatibility overlay."
+            )
+
+        if _SNAPSHOT_RUNTIME_FIELDS not in patched and _SNAPSHOT_RUNTIME_MARKER in patched:
+            patched = patched.replace(
+                _SNAPSHOT_RUNTIME_MARKER,
+                _SNAPSHOT_RUNTIME_FIELDS,
+                1,
             )
 
         target = self.entrypoint

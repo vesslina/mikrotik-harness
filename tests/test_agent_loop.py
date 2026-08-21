@@ -79,17 +79,6 @@ class _Provider:
         self.calls += 1
         if self.calls == 1:
             return ProviderReply(
-                "Load interface tools.",
-                (
-                    ProviderToolCall(
-                        "select-1",
-                        "select_router_capabilities",
-                        {"domains": ["interfaces"]},
-                    ),
-                ),
-            )
-        if self.calls == 2:
-            return ProviderReply(
                 "I will inspect interfaces.",
                 (
                     ProviderToolCall(
@@ -117,14 +106,10 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
 
         events = await loop.run("Show interfaces", AgentMode.READY)
 
-        selector = ("select_router_capabilities",)
-        selected = (
-            "select_router_capabilities",
-            "list_interfaces",
-            "propose_lan_bridge",
-            "propose_ip_address",
-        )
-        assert provider.tool_names == [selector, selected, selected]
+        assert len(provider.tool_names) == 2
+        assert "list_interfaces" in provider.tool_names[0]
+        assert "propose_lan_bridge" in provider.tool_names[0]
+        assert provider.tool_names[0] == provider.tool_names[1]
         assert backend.arguments == {"routerId": "mikrotik-afe23e"}
         assert backend.catalog_calls == 1
         assert any(isinstance(event, PlannedAction) for event in events)
@@ -137,27 +122,37 @@ def test_ready_loop_filters_catalog_and_binds_connected_router() -> None:
     asyncio.run(scenario())
 
 
-def test_plan_mode_exposes_no_tools() -> None:
+def test_plan_mode_exposes_all_live_read_tools() -> None:
     async def scenario() -> None:
         backend = _Backend()
 
         class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
             async def complete(self, messages, tools=()) -> ProviderReply:
-                assert not tools
+                self.calls += 1
+                assert tuple(tool.name for tool in tools) == ("list_interfaces",)
+                if self.calls == 1:
+                    return ProviderReply(
+                        "Inspect interfaces.",
+                        (ProviderToolCall("read-1", "list_interfaces", {}),),
+                    )
                 return ProviderReply("Here is a read-only diagnostic plan.", ())
 
+        provider = Provider()
         loop = ReadOnlyAgentLoop(
             preset=_preset(),
-            provider=Provider(),
+            provider=provider,
             backend=backend,
             router_id="mikrotik-afe23e",
         )
 
         events = await loop.run("Plan diagnostics", AgentMode.PLAN)
 
-        assert isinstance(events[0], AgentMessage)
-        assert backend.arguments is None
-        assert backend.catalog_calls == 0
+        assert any(isinstance(event, AgentMessage) for event in events)
+        assert backend.arguments == {"routerId": "mikrotik-afe23e"}
+        assert backend.catalog_calls == 1
 
     asyncio.run(scenario())
 
@@ -444,20 +439,6 @@ def test_pppoe_intent_becomes_harness_proposal_without_backend_write() -> None:
 
             async def complete(self, messages, tools=()) -> ProviderReply:
                 self.calls += 1
-                if self.calls == 1:
-                    assert {tool.name for tool in tools} == {
-                        "select_router_capabilities"
-                    }
-                    return ProviderReply(
-                        "",
-                        (
-                            ProviderToolCall(
-                                "select-1",
-                                "select_router_capabilities",
-                                {"domains": ["wan_vpn"]},
-                            ),
-                        ),
-                    )
                 assert "propose_wan_pppoe" in {tool.name for tool in tools}
                 return ProviderReply(
                     "",
@@ -524,17 +505,6 @@ def test_ready_loop_turns_live_write_schema_into_typed_proposal() -> None:
 
             async def complete(self, messages, tools=()):
                 self.calls += 1
-                if self.calls == 1:
-                    return ProviderReply(
-                        "",
-                        (
-                            ProviderToolCall(
-                                "select-1",
-                                "select_router_capabilities",
-                                {"domains": ["firewall_routing"]},
-                            ),
-                        ),
-                    )
                 names = {tool.name for tool in tools}
                 assert "manage_route" not in names
                 assert "propose_typed_manage_route" in names

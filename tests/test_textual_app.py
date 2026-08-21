@@ -70,6 +70,35 @@ def test_refresh_runs_discovery_again() -> None:
     asyncio.run(scenario())
 
 
+def test_discovery_shows_each_address_of_one_router() -> None:
+    async def scenario() -> None:
+        device = DeviceInfo(
+            mac="08:00:27:AF:E2:3E",
+            ipv4_addresses=("172.20.20.1", "192.168.56.103"),
+            identity="MikroTik",
+            version="7.21.5",
+            board="CHR",
+            interfaces=("ether1", "ether2"),
+            software_id="vfGBUYu42WL",
+            source_ip="172.20.20.1",
+        )
+        app = DiscoveryApp(
+            discoverer=lambda **_kwargs: DiscoveryResult(devices=(device,)),
+            timeout=0.1,
+            language=Language.EN,
+        )
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            table = app.query_one("#devices", DataTable)
+            assert table.row_count == 2
+            table.move_cursor(row=1)
+            await pilot.press("enter")
+            assert app.query_one("#connect-to", Input).value == "192.168.56.103"
+
+    asyncio.run(scenario())
+
+
 def test_connect_requires_password() -> None:
     async def scenario() -> None:
         app = DiscoveryApp(

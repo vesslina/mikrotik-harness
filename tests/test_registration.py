@@ -98,7 +98,8 @@ def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_pa
     assert "manage_wireguard_interface" in operator["allowedToolPatterns"]
     assert "manage_wireguard_peer" in operator["allowedToolPatterns"]
     assert "apply_plan" in operator["allowedToolPatterns"]
-    assert "run_command" not in operator["allowedToolPatterns"]
+    assert "run_command" in operator["allowedToolPatterns"]
+    assert "manage_*" in operator["allowedToolPatterns"]
     assert environment["ROUTER_MIKROTIK_AFE23E_PASS"] == "top-secret"
     assert "top-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
 

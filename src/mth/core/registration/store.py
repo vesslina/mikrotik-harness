@@ -13,7 +13,7 @@ import yaml
 
 from mth.core.mcp_client.runtime import project_root
 from mth.core.registration.models import PendingRegistration
-from mth.core.runbooks import APPROVED_TYPED_CHANGE_DOMAINS, DEFAULT_RUNBOOK_REGISTRY
+from mth.core.runbooks import DEFAULT_RUNBOOK_REGISTRY
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,11 +49,23 @@ class MikroMcpConfigStore:
         "check_router_health",
         "ping",
         "traceroute",
+        "torch",
+        "bandwidth_test",
         "plan_changes",
         "apply_plan",
         "rollback_change",
+        "manage_*",
+        "set_*",
+        "create_*",
+        "delete_*",
+        "export_*",
+        "upload_*",
+        "fetch_url",
+        "reboot",
+        "run_script",
+        "run_command",
+        "write_swos_blob",
         *DEFAULT_RUNBOOK_REGISTRY.write_tools,
-        *sorted(APPROVED_TYPED_CHANGE_DOMAINS),
     )
 
     def __init__(self, paths: ConfigPaths | None = None) -> None:

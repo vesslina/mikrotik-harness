@@ -95,3 +95,21 @@ def test_capability_router_rejects_global_write_and_misannotated_tools() -> None
     )
     fallback = router.select(catalog, ["unknown"])
     assert fallback.domains == ("overview",)
+
+
+def test_ready_catalog_exposes_all_reads_and_any_router_bound_change_as_proposal() -> None:
+    router = ToolCatalogRouter()
+    schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+    catalog = (
+        McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
+        McpTool("torch", None, schema, {"readOnlyHint": True}),
+        McpTool("manage_container", None, schema, {"readOnlyHint": False}),
+        McpTool("reboot", None, {"type": "object", "properties": {}}, {"readOnlyHint": False}),
+        McpTool("apply_plan", None, schema, {"readOnlyHint": False}),
+    )
+
+    assert [tool.name for tool in router.plan_tools(catalog)] == ["list_interfaces", "torch"]
+    names = {tool.name for tool in router.ready_tools(catalog)}
+    assert {"list_interfaces", "torch", "propose_typed_manage_container"} <= names
+    assert "propose_typed_reboot" not in names
+    assert "propose_typed_apply_plan" not in names

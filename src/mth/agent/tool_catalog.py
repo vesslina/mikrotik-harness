@@ -33,8 +33,20 @@ class CapabilitySelection:
 class ToolCatalogRouter:
     """Routes the live MCP catalog into small, safe domain packs."""
 
-    READ_ONLY_EXACT = frozenset({"check_router_health", "ping", "traceroute"})
-    READ_ONLY_PREFIXES = ("list_", "get_")
+    # Trust MikroMCP annotations for broad read coverage (e.g. torch), while
+    # retaining a small deny-list against a malformed annotation on an obvious
+    # mutation/control primitive.
+    READ_ONLY_FORBIDDEN_PREFIXES = (
+        "manage_",
+        "set_",
+        "create_",
+        "delete_",
+        "run_",
+        "write_",
+    )
+    READ_ONLY_FORBIDDEN_EXACT = frozenset(
+        {"apply_plan", "rollback_change", "bulk_execute", "reboot", "fetch_url", "upload_file"}
+    )
     BASE_TOOLS = frozenset({"check_router_health", "get_system_status"})
     SELECTOR_NAME = "select_router_capabilities"
 
@@ -91,21 +103,38 @@ class ToolCatalogRouter:
             tools=(self.selector_tool, *selected, *proposal_tools, *typed_proposals),
         )
 
+    def plan_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
+        """All live RouterOS reads are available for PLAN-mode reconnaissance."""
+
+        return self.filter_read_only(catalog)
+
+    def ready_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
+        """Expose every safe read plus an approval wrapper for every router-bound write."""
+
+        live = tuple(catalog)
+        scenario_proposals = tuple(
+            self._proposal_tool(definition) for definition in self.registry.all()
+        )
+        generic_proposals = typed_proposals_for_domains(live, None)
+        by_name: dict[str, McpTool] = {}
+        for tool in (*self.filter_read_only(live), *scenario_proposals, *generic_proposals):
+            by_name.setdefault(tool.name, tool)
+        return tuple(by_name.values())
+
     @classmethod
     def filter_read_only(cls, tools: Sequence[McpTool]) -> tuple[McpTool, ...]:
         return tuple(tool for tool in tools if cls.is_router_bound_read_tool(tool))
 
     @classmethod
     def is_router_bound_read_tool(cls, tool: McpTool) -> bool:
-        name_allowed = (
-            tool.name in cls.READ_ONLY_EXACT
-            or tool.name.startswith(cls.READ_ONLY_PREFIXES)
-        )
         properties = tool.input_schema.get("properties")
         router_bound = isinstance(properties, dict) and "routerId" in properties
+        obvious_write = tool.name in cls.READ_ONLY_FORBIDDEN_EXACT or tool.name.startswith(
+            cls.READ_ONLY_FORBIDDEN_PREFIXES
+        )
         return (
-            name_allowed
-            and router_bound
+            router_bound
+            and not obvious_write
             and tool.annotations.get("readOnlyHint") is True
             and tool.annotations.get("destructiveHint") is not True
         )

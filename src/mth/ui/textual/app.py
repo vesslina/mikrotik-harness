@@ -161,6 +161,8 @@ class DiscoveryApp(App[None]):
 
     #connect {
         width: 100%;
+        height: 3;
+        min-height: 3;
         margin-top: 1;
         background: #ff3b30;
         color: white;
@@ -211,6 +213,7 @@ class DiscoveryApp(App[None]):
         self._active = active
         self._registrar = registrar or RegistrationService()
         self._devices: dict[str, DeviceInfo] = {}
+        self._device_rows: dict[str, tuple[DeviceInfo, str]] = {}
         self._selected_device: DeviceInfo | None = None
         self._discovery_generation = 0
         self._pending_fingerprint: PendingRegistration | None = None
@@ -322,16 +325,21 @@ class DiscoveryApp(App[None]):
         table = self.query_one("#devices", DataTable)
         table.clear(columns=False)
         self._devices = {device.key: device for device in result.devices}
+        self._device_rows = {}
 
         for device in result.devices:
-            table.add_row(
-                device.mac or "—",
-                self._device_address(device) or "—",
-                device.identity or "—",
-                device.version or "—",
-                device.board or "—",
-                key=device.key,
-            )
+            addresses = self._device_addresses(device) or ("—",)
+            for index, address in enumerate(addresses):
+                row_key = f"{device.key}:{index}"
+                self._device_rows[row_key] = (device, address)
+                table.add_row(
+                    device.mac or "—",
+                    address,
+                    device.identity or "—",
+                    device.version or "—",
+                    device.board or "—",
+                    key=row_key,
+                )
 
         if result.devices:
             warning_suffix = f" {result.warnings[0]}" if result.warnings else ""
@@ -361,11 +369,11 @@ class DiscoveryApp(App[None]):
             self._select_device(str(event.row_key.value))
 
     def _select_device(self, key: str) -> None:
-        device = self._devices.get(key)
-        if device is None:
+        selected = self._device_rows.get(key)
+        if selected is None:
             return
-        address = self._device_address(device)
-        if address:
+        device, address = selected
+        if address != "—":
             self._selected_device = device
             self.query_one("#connect-to", Input).value = address
             self._set_status(
@@ -405,7 +413,7 @@ class DiscoveryApp(App[None]):
             return
 
         device = self._selected_device
-        if device is not None and self._device_address(device) != target:
+        if device is not None and target not in self._device_addresses(device):
             device = None
         self._set_connecting(True)
         self._set_status(tr(self.language, "discovery.connecting", target=target))
@@ -522,7 +530,7 @@ class DiscoveryApp(App[None]):
             )
         )
         device = self._selected_device
-        if device is not None and self._device_address(device) != pending.host:
+        if device is not None and pending.host not in self._device_addresses(device):
             device = None
         profile = ChatProfile(
             router_id=result.router_id,
@@ -553,7 +561,10 @@ class DiscoveryApp(App[None]):
         self.query_one("#status", Static).update(message)
 
     @staticmethod
-    def _device_address(device: DeviceInfo) -> str:
-        if device.ipv4_addresses:
-            return device.ipv4_addresses[0]
-        return device.source_ip or ""
+    def _device_addresses(device: DeviceInfo) -> tuple[str, ...]:
+        """Keep every discovered IPv4 target visible, including a source-only reply."""
+
+        addresses = list(device.ipv4_addresses)
+        if device.source_ip and device.source_ip not in addresses:
+            addresses.append(device.source_ip)
+        return tuple(addresses)

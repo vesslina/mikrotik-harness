@@ -48,6 +48,7 @@ from mth.agent import (
     ToolResult,
     VerificationResult,
 )
+from mth.agent.tool_catalog import ToolCatalogRouter
 from mth.core.mcp_client import MikroMcpClient
 from mth.core.registration import MikroMcpConfigStore, RegistrationResult
 from mth.core.runbooks import (
@@ -65,6 +66,7 @@ from mth.core.runbooks import (
     RunbookRollbackResult,
     RunbookSubmission,
     TypedChangeDefinition,
+    is_approval_bound_change,
 )
 from mth.ui.textual.i18n import (
     THINKING_PHRASES,
@@ -1391,7 +1393,8 @@ class ChatScreen(Screen[None]):
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /model  /models [name]  /history  /resume [id]  /language [en|ru]  "
+                "/help  /info  /tools  /model  /models [name]  /history  /resume [id]  "
+                "/language [en|ru]  "
                 "/pppoe  /bridge  /ip-address  /address-list  /dhcp  /dns  "
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
                 "/log  /copy  /clear  /exit\n"
@@ -1405,6 +1408,8 @@ class ChatScreen(Screen[None]):
             )
         elif command == "/info":
             self._write_system(self._info_text())
+        elif command == "/tools":
+            self._show_live_tools()
         elif command == "/model":
             self._show_model_form()
         elif command == "/models":
@@ -1444,6 +1449,50 @@ class ChatScreen(Screen[None]):
             self.app.pop_screen()
         else:
             self._write_system(f"Unknown command: {command}. Use /help.", error=True)
+
+    @work(exclusive=True, group="tools", exit_on_error=False)
+    async def _show_live_tools(self) -> None:
+        """Show the exact current backend catalog instead of asking the model to recall it."""
+
+        self._write_system("Loading live MCP catalog…")
+        try:
+            backend = MikroMcpClient(
+                environment=MikroMcpConfigStore().runtime_environment()
+            )
+            catalog = await backend.list_tools()
+        except Exception as error:
+            self._write_system(f"Could not load live MCP catalog: {error}", error=True)
+            return
+        read_tools = ToolCatalogRouter.filter_read_only(catalog)
+        change_tools = tuple(tool for tool in catalog if is_approval_bound_change(tool))
+        controls = tuple(
+            tool.name
+            for tool in catalog
+            if tool.name not in {item.name for item in read_tools}
+            and tool.name not in {item.name for item in change_tools}
+        )
+        title = (
+            "Живой каталог MikroMCP"
+            if self._language is Language.RU
+            else "Live MikroMCP catalog"
+        )
+        extension_note = (
+            (
+                " (включая безопасное расширение Harness list_ip_addresses)"
+                if self._language is Language.RU
+                else " (including the safe Harness list_ip_addresses extension)"
+            )
+            if any(tool.name == "list_ip_addresses" for tool in catalog)
+            else ""
+        )
+        self._write_system(
+            f"{title}: {len(catalog)} tools{extension_note}\n"
+            f"Read ({len(read_tools)}): " + ", ".join(tool.name for tool in read_tools) + "\n\n"
+            f"Approval-bound changes ({len(change_tools)}): "
+            + ", ".join(tool.name for tool in change_tools)
+            + "\n\nHarness controls: "
+            + ", ".join(controls)
+        )
 
     def _show_models(self, requested: str) -> None:
         try:
@@ -1828,6 +1877,7 @@ class ChatScreen(Screen[None]):
                 message += f"Use /rollback {plan.plan_id} to undo the complete runbook."
             self._write_system(message, error=not result.verified)
             await self._report_applied_change(plan, result)
+            await self._continue_agent_after_change(plan, result)
         finally:
             self._pending_runbook = None
             input_widget = self.query_one("#chat-input", Input)
@@ -1867,6 +1917,63 @@ class ChatScreen(Screen[None]):
                     self._write_system(f"Could not update session: {error}", error=True)
         finally:
             self._stop_activity()
+
+    async def _continue_agent_after_change(
+        self, plan: RunbookPlan, result: RunbookApplyResult
+    ) -> None:
+        """Return control to the agent so a multi-step request does not stop at approval."""
+
+        agent = self._agent
+        if agent is None or self._mode is not AgentMode.READY:
+            return
+        status = "verified" if result.verified else "unverified"
+        continuation = (
+            "Continue the original user request after the approval workflow. "
+            f"The change {plan.title!r} was applied with status {status}. "
+            "Do not repeat that change. Inspect live state when needed; if more requested "
+            "changes remain, prepare the next approval proposal. If the work is complete, "
+            "give the user one concise final report."
+        )
+        self._start_activity()
+        try:
+            events = await agent.run(continuation, AgentMode.READY)
+        except ProviderError as error:
+            self._write_system(f"Continuation failed — {error.code}: {error}", error=True)
+            return
+        except Exception as error:
+            self._write_system(f"Continuation failed: {error}", error=True)
+            return
+        finally:
+            self._stop_activity()
+
+        proposal = next(
+            (event for event in events if isinstance(event, RunbookProposal)),
+            None,
+        )
+        streamed_progress = bool(getattr(agent, "streams_progress", False))
+        for event in events:
+            if streamed_progress and isinstance(event, (PlannedAction, ToolCall, ToolResult)):
+                continue
+            self._render_event(event)
+        if proposal is not None:
+            try:
+                self._open_runbook(self._definition_for_id(proposal.runbook), proposal)
+            except KeyError:
+                self._write_system(f"Unknown runbook proposal: {proposal.runbook}", error=True)
+            return
+        response = next(
+            (event.text for event in reversed(events) if isinstance(event, AgentMessage)),
+            "",
+        )
+        if response and self._session is not None:
+            try:
+                self._session = self._sessions.append_response(
+                    self._session.session_id,
+                    self.profile.router_id,
+                    response,
+                )
+            except (KeyError, OSError, ValueError) as error:
+                self._write_system(f"Could not update session: {error}", error=True)
 
     def _start_rollback(self, token: str) -> None:
         if self._mode is not AgentMode.READY:

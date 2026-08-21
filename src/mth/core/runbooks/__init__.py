@@ -48,6 +48,7 @@ from mth.core.runbooks.pppoe import (
 from mth.core.runbooks.typed import (
     APPROVED_TYPED_CHANGE_DOMAINS,
     TypedChangeDefinition,
+    is_approval_bound_change,
     is_approved_typed_change,
     typed_definition_for_proposal,
     typed_proposals_for_domains,
@@ -92,6 +93,7 @@ __all__ = [
     "WanPppoeDefinition",
     "WireGuardPeerDefinition",
     "is_approved_typed_change",
+    "is_approval_bound_change",
     "typed_definition_for_proposal",
     "typed_proposals_for_domains",
 ]

@@ -158,9 +158,11 @@ class ReadOnlyAgentLoop:
         )
 
     async def run(self, prompt: str, mode: AgentMode) -> tuple[AgentEvent, ...]:
-        catalog = await self._backend.list_tools() if mode is AgentMode.READY else ()
-        tools: tuple[McpTool, ...] = (
-            (self._catalog_router.selector_tool,) if mode is AgentMode.READY else ()
+        catalog = await self._backend.list_tools()
+        tools = (
+            self._catalog_router.plan_tools(catalog)
+            if mode is AgentMode.PLAN
+            else self._catalog_router.ready_tools(catalog)
         )
         system_prompt = self._system_prompt(mode)
         messages: list[dict[str, Any]] = [
@@ -198,22 +200,14 @@ class ReadOnlyAgentLoop:
                 events.append(FinalSummary(text, FinalOutcome.COMPLETED))
                 self._remember(prompt, text)
                 return tuple(events)
-            if mode is AgentMode.PLAN:
-                events.append(
-                    FinalSummary(
-                        "The model attempted a tool call while PLAN mode was active.",
-                        FinalOutcome.STOPPED,
-                    )
-                )
-                return tuple(events)
-
             messages.append(self._assistant_tool_message(reply))
-            allowed = {tool.name for tool in tools}
+            tools_by_name = {tool.name: tool for tool in tools}
             for call in reply.tool_calls:
-                if call.name not in allowed:
+                call_tool = tools_by_name.get(call.name)
+                if call_tool is None:
                     events.append(
                         FinalSummary(
-                            f"Blocked non-read-only or unknown tool: {call.name}",
+                            f"Blocked unknown or unavailable tool: {call.name}",
                             FinalOutcome.STOPPED,
                         )
                     )
@@ -300,7 +294,9 @@ class ReadOnlyAgentLoop:
                     )
                     return tuple(events)
                 arguments = dict(call.arguments)
-                arguments["routerId"] = self._router_id
+                properties = call_tool.input_schema.get("properties")
+                if isinstance(properties, dict) and "routerId" in properties:
+                    arguments["routerId"] = self._router_id
                 self._progress(
                     events,
                     PlannedAction(
@@ -323,7 +319,7 @@ class ReadOnlyAgentLoop:
                 self._progress(events, self._result_event(call, safe_result))
                 messages.append(self._tool_message(call, safe_result))
 
-        summary = "Stopped after the maximum number of read-only tool rounds."
+        summary = "Stopped after the maximum number of agent tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
         return tuple(events)
 
@@ -348,6 +344,7 @@ class ReadOnlyAgentLoop:
             "status": status,
             "operationalState": operational,
             "verification": result.verification.details,
+            "backendSummary": result.backend_summary,
             "rollbackAvailable": bool(result.journal_ids),
         }
         reply = await self._provider.complete(
@@ -360,8 +357,8 @@ class ReadOnlyAgentLoop:
                         f"{'Russian' if self._response_language == 'ru' else 'English'}. "
                         "State what changed, whether "
                         "verification passed, and whether rollback is available. Do not invent "
-                        "facts, commands, "
-                        "or additional changes. Use 2-5 short sentences."
+                        "facts, commands, failures absent from the supplied evidence, or "
+                        "additional changes. Use 2-5 short sentences."
                     ),
                 },
                 {
@@ -492,12 +489,13 @@ class ReadOnlyAgentLoop:
 
     def _system_prompt(self, mode: AgentMode) -> str:
         boundary = (
-            "PLAN mode is active. Explain a safe approach without calling tools."
+            "PLAN mode is active. You have the complete live read-only RouterOS catalog. "
+            "Inspect as much live state as needed, but do not propose or execute changes."
             if mode is AgentMode.PLAN
             else (
-            "READY mode is active. Before reading live state or proposing a change, call "
-            "select_router_capabilities with the relevant domain(s). Then use the supplied "
-            "read-only tools or a propose_* runbook tool. A supplied propose_* tool is an "
+                "READY mode is active. You have the complete live read catalog and approval "
+                "wrappers for every router-bound write tool. Use read tools freely; use a "
+                "supplied propose_* tool for changes. A supplied propose_* tool is an "
             "available change path through approval, not an absence of write capability. For "
             "example, propose_typed_manage_ip_address can add, update, or remove one exact "
             "address when both its CIDR and interface are known. Proposal tools only open a human "

@@ -29,9 +29,9 @@ _SETTLED_ACTIONS = frozenset(
     }
 )
 
-# Reviewed, router-bound, typed configuration tools with snapshot-backed rollback and no
-# secret or arbitrary-code fields. This is an intentional security allowlist, intersected
-# with the live tools/list response; it is not a hardcoded backend catalog.
+# Scenario runbooks still provide richer forms and specialised verification.  The generic
+# proposal path intentionally follows the live catalog, however: READY must not hide a
+# RouterOS configuration capability merely because a bespoke runbook has not been written.
 APPROVED_TYPED_CHANGE_DOMAINS: dict[str, frozenset[str]] = {
     "manage_address_list_entry": frozenset({"firewall_routing"}),
     "manage_bridge": frozenset({"interfaces"}),
@@ -69,6 +69,31 @@ def is_approved_typed_change(tool_name: str) -> bool:
     return tool_name in APPROVED_TYPED_CHANGE_DOMAINS
 
 
+_HARNESS_CONTROL_TOOLS = frozenset(
+    {"apply_plan", "bulk_execute", "plan_changes", "rollback_change"}
+)
+
+
+class TypedDryRunFailure(RuntimeError):
+    """Structured MikroMCP dry-run rejection retained for post-check semantics."""
+
+    def __init__(self, detail: str, error_code: str | None = None) -> None:
+        super().__init__(detail)
+        self.error_code = error_code
+
+
+def is_approval_bound_change(tool: McpTool) -> bool:
+    """Whether a live router write can be represented by a confirmation-bound proposal."""
+
+    properties = tool.input_schema.get("properties")
+    return (
+        tool.name not in _HARNESS_CONTROL_TOOLS
+        and tool.annotations.get("readOnlyHint") is not True
+        and isinstance(properties, dict)
+        and "routerId" in properties
+    )
+
+
 class TypedChangeDefinition(RunbookDefinition):
     """Runtime runbook around one reviewed live MikroMCP write-tool schema."""
 
@@ -78,8 +103,8 @@ class TypedChangeDefinition(RunbookDefinition):
     )
 
     def __init__(self, tool: McpTool) -> None:
-        if not is_approved_typed_change(tool.name):
-            raise ValueError(f"Typed change tool is not approved: {tool.name}")
+        if not is_approval_bound_change(tool):
+            raise ValueError(f"Tool cannot be executed through the approval workflow: {tool.name}")
         self._tool = tool
         self.id = f"typed:{tool.name}"
         self.title = (tool.description or tool.name.replace("_", " ")).split(".", 1)[0]
@@ -93,7 +118,7 @@ class TypedChangeDefinition(RunbookDefinition):
             + self.description
         )
         self.write_tools = frozenset({tool.name})
-        self.capability_domains = APPROVED_TYPED_CHANGE_DOMAINS[tool.name]
+        self.capability_domains = APPROVED_TYPED_CHANGE_DOMAINS.get(tool.name, frozenset())
 
     @property
     def tool_name(self) -> str:
@@ -105,7 +130,11 @@ class TypedChangeDefinition(RunbookDefinition):
             McpTool(
                 tool_name,
                 tool_name.replace("_", " "),
-                {"type": "object", "properties": {}, "additionalProperties": False},
+                {
+                    "type": "object",
+                    "properties": {"routerId": {"type": "string"}},
+                    "additionalProperties": False,
+                },
                 {"readOnlyHint": False, "destructiveHint": True},
             )
         )
@@ -200,7 +229,10 @@ class TypedChangeDefinition(RunbookDefinition):
             raise RuntimeError("MikroMCP omitted structured dry-run state")
         action = dry_run.get("action")
         if action == "would_fail" or not isinstance(action, str):
-            raise RuntimeError(str(first.get("dryRunResult") or "Typed change would fail"))
+            raise TypedDryRunFailure(
+                str(first.get("dryRunResult") or "Typed change would fail"),
+                str(dry_run.get("error")) if dry_run.get("error") is not None else None,
+            )
         current_state = first.get("currentState")
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -222,7 +254,20 @@ class TypedChangeDefinition(RunbookDefinition):
     async def verify_apply(
         self, session: ToolSession, router_id: str, values: Mapping[str, Any]
     ) -> RunbookVerification:
-        action, _ = await self._probe(session, router_id, values)
+        try:
+            action, _ = await self._probe(session, router_id, values)
+        except TypedDryRunFailure as error:
+            requested = self.build_steps(values)[0].params.get("action")
+            if (
+                requested == "remove"
+                and error.error_code
+                and error.error_code.endswith("NOT_FOUND")
+            ):
+                return RunbookVerification(
+                    True,
+                    "Post-apply dry-run confirms that the requested record is absent.",
+                )
+            return RunbookVerification(False, f"Post-apply dry-run failed: {error}")
         settled = action in _SETTLED_ACTIONS
         return RunbookVerification(
             settled,
@@ -252,25 +297,21 @@ def typed_definition_for_proposal(
     catalog: tuple[McpTool, ...], proposal_name: str
 ) -> TypedChangeDefinition | None:
     for tool in catalog:
-        if typed_proposal_name(tool.name) == proposal_name and is_approved_typed_change(
-            tool.name
-        ):
+        if typed_proposal_name(tool.name) == proposal_name and is_approval_bound_change(tool):
             return TypedChangeDefinition(tool)
     return None
 
 
 def typed_proposals_for_domains(
-    catalog: tuple[McpTool, ...], domains: tuple[str, ...]
+    catalog: tuple[McpTool, ...], domains: tuple[str, ...] | None = None
 ) -> tuple[McpTool, ...]:
-    requested = set(domains)
+    requested = set(domains or ())
     proposals: list[McpTool] = []
     for tool in catalog:
         tool_domains = APPROVED_TYPED_CHANGE_DOMAINS.get(tool.name)
-        if (
-            tool_domains is None
-            or not tool_domains.intersection(requested)
-            or tool.annotations.get("readOnlyHint") is True
-        ):
+        if not is_approval_bound_change(tool):
+            continue
+        if requested and tool_domains is not None and not tool_domains.intersection(requested):
             continue
         proposals.append(TypedChangeDefinition(tool).proposal_tool)
     return tuple(proposals)
