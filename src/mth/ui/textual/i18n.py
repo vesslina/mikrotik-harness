@@ -259,7 +259,31 @@ class UiSettingsStore:
             return detect_system_language()
 
     def save_language(self, language: Language) -> None:
-        document: dict[str, Any] = {"version": 1, "language": language}
+        document = self._load()
+        document["version"] = 1
+        document["language"] = language
+        self._write(document)
+
+    def last_address(self) -> str:
+        value = self._load().get("last_address")
+        return str(value).strip() if isinstance(value, str) else ""
+
+    def save_last_address(self, address: str) -> None:
+        document = self._load()
+        document["version"] = 1
+        document["last_address"] = address.strip()
+        self._write(document)
+
+    def _load(self) -> dict[str, Any]:
+        if not self.paths.file.exists():
+            return {"version": 1, "language": detect_system_language()}
+        try:
+            loaded = json.loads(self.paths.file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"version": 1, "language": detect_system_language()}
+        return loaded if isinstance(loaded, dict) else {"version": 1}
+
+    def _write(self, document: dict[str, Any]) -> None:
         path = self.paths.file
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)

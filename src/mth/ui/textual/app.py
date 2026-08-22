@@ -9,6 +9,7 @@ from textual.containers import Center, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.discovery import DiscoveryError, discover_devices
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
 from mth.core.registration import (
@@ -198,9 +199,16 @@ class DiscoveryApp(App[None]):
         registrar: Registrar | None = None,
         settings_store: UiSettingsStore | None = None,
         language: Language | None = None,
+        credential_store: ProviderSecretStore | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings_store or UiSettingsStore()
+        self._credential_store = credential_store or ProviderSecretStore(
+            ProviderSecretPaths(
+                file=self._settings.paths.file.with_name("discovery-secrets.json"),
+                key_file=self._settings.paths.file.with_name("discovery-secrets.key"),
+            )
+        )
         self.language = language or self._settings.language()
         self.sub_title = tr(self.language, "discovery.subtitle")
         self.bind("r", "refresh", description=tr(self.language, "discovery.refresh"))
@@ -244,7 +252,9 @@ class DiscoveryApp(App[None]):
                 with Vertical(classes="connection-field"):
                     yield Label(tr(self.language, "discovery.connect_to"))
                     yield Input(
-                        placeholder=tr(self.language, "discovery.address"), id="connect-to"
+                        value=self._settings.last_address(),
+                        placeholder=tr(self.language, "discovery.address"),
+                        id="connect-to",
                     )
                 with Vertical(classes="connection-field"):
                     yield Label(tr(self.language, "discovery.login"))
@@ -257,6 +267,7 @@ class DiscoveryApp(App[None]):
                     yield Label(tr(self.language, "discovery.password"))
                     yield Input(
                         password=True,
+                        value=self._saved_password(),
                         placeholder=tr(self.language, "discovery.password_placeholder"),
                         id="password",
                     )
@@ -412,6 +423,8 @@ class DiscoveryApp(App[None]):
             self._set_status(tr(self.language, "discovery.need_password"))
             return
 
+        self._remember_connection(target, password)
+
         device = self._selected_device
         if device is not None and target not in self._device_addresses(device):
             device = None
@@ -447,7 +460,6 @@ class DiscoveryApp(App[None]):
         self.call_from_thread(self._review_fingerprint, pending)
 
     def _review_fingerprint(self, pending: PendingRegistration) -> None:
-        self.query_one("#password", Input).value = ""
         if pending.trusted_fingerprint:
             self._verify_registration(pending)
             return
@@ -559,6 +571,20 @@ class DiscoveryApp(App[None]):
 
     def _set_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
+
+    def _saved_password(self) -> str:
+        try:
+            return self._credential_store.get("last-routeros") or ""
+        except (OSError, ValueError):
+            return ""
+
+    def _remember_connection(self, address: str, password: str) -> None:
+        try:
+            self._settings.save_last_address(address)
+            self._credential_store.set("last-routeros", password)
+        except (OSError, ValueError):
+            # Connection must remain usable even if the local credential vault is unavailable.
+            pass
 
     @staticmethod
     def _device_addresses(device: DeviceInfo) -> tuple[str, ...]:

@@ -7,7 +7,7 @@ from mth.core.registration import PendingRegistration, RegistrationResult
 from mth.ui.textual import clipboard as system_clipboard
 from mth.ui.textual.app import DiscoveryApp
 from mth.ui.textual.chat import ChatScreen
-from mth.ui.textual.i18n import Language
+from mth.ui.textual.i18n import Language, UiSettingsPaths, UiSettingsStore
 
 
 def _device() -> DeviceInfo:
@@ -99,12 +99,13 @@ def test_discovery_shows_each_address_of_one_router() -> None:
     asyncio.run(scenario())
 
 
-def test_connect_requires_password() -> None:
+def test_connect_requires_password(tmp_path) -> None:
     async def scenario() -> None:
         app = DiscoveryApp(
             discoverer=lambda **_kwargs: DiscoveryResult(devices=()),
             timeout=0.1,
             language=Language.EN,
+            settings_store=UiSettingsStore(UiSettingsPaths(file=tmp_path / "settings.json")),
         )
 
         async with app.run_test(size=(120, 40)):
@@ -192,7 +193,7 @@ class _FakeRegistrar:
         )
 
 
-def test_first_connection_requires_fingerprint_confirmation() -> None:
+def test_first_connection_requires_fingerprint_confirmation(tmp_path) -> None:
     async def scenario() -> None:
         registrar = _FakeRegistrar(already_trusted=False)
         app = DiscoveryApp(
@@ -200,6 +201,7 @@ def test_first_connection_requires_fingerprint_confirmation() -> None:
             registrar=registrar,
             timeout=0.1,
             language=Language.EN,
+            settings_store=UiSettingsStore(UiSettingsPaths(file=tmp_path / "settings.json")),
         )
 
         async with app.run_test(size=(120, 40)) as pilot:
@@ -222,6 +224,6 @@ def test_first_connection_requires_fingerprint_confirmation() -> None:
             assert "Live MCP tools: 122" in str(
                 app.query_one("#backend-status", Static).content
             )
-            assert app.query_one("#password", Input).value == ""
+            assert app.query_one("#password", Input).value == "secret"
 
     asyncio.run(scenario())

@@ -127,6 +127,24 @@ class ModelSelection:
     api_key: str | None = field(default=None, repr=False)
 
 
+LOCAL_CONTEXT_TOKENS = 60_000
+REMOTE_CONTEXT_TOKENS = 200_000
+
+
+def _context_default(provider: ProviderKind) -> int:
+    """Use a conservative window for local models and a larger remote default."""
+
+    return LOCAL_CONTEXT_TOKENS if provider is ProviderKind.LM_STUDIO else REMOTE_CONTEXT_TOKENS
+
+
+def _provider_label(provider: ProviderKind) -> str:
+    """Keep legacy provider values readable without exposing implementation names."""
+
+    if provider is ProviderKind.LM_STUDIO:
+        return "Local model"
+    return "OpenAI-compatible provider"
+
+
 @dataclass(frozen=True, slots=True)
 class ModelPickerResult:
     preset: ProviderPreset
@@ -291,7 +309,6 @@ class PixelLogo(Static):
 class ModelWizardScreen(ModalScreen[ModelSelection | None]):
     DEFAULT_URLS = {
         ProviderKind.LM_STUDIO: "http://127.0.0.1:1234/v1",
-        ProviderKind.OPENROUTER: "https://openrouter.ai/api/v1",
         ProviderKind.OPENAI_COMPATIBLE: "",
     }
 
@@ -326,21 +343,20 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                 yield Label("Provider", classes="field-label")
                 yield Select(
                     (
-                        ("Local — LM Studio", ProviderKind.LM_STUDIO),
-                        ("OpenRouter", ProviderKind.OPENROUTER),
-                        ("Custom OpenAI-compatible", ProviderKind.OPENAI_COMPATIBLE),
+                        ("Local model — LM Studio / Ollama / ai.local", ProviderKind.LM_STUDIO),
+                        ("OpenAI-compatible provider", ProviderKind.OPENAI_COMPATIBLE),
                     ),
-                    value=ProviderKind.OPENROUTER,
+                    value=ProviderKind.LM_STUDIO,
                     allow_blank=False,
                     id="provider-kind",
                 )
             with Horizontal(classes="model-row"):
                 yield Label("Preset name", classes="field-label")
-                yield Input(value="openrouter", id="preset-name")
+                yield Input(value="local", id="preset-name")
             with Horizontal(classes="model-row"):
                 yield Label("Base URL", classes="field-label")
                 yield Input(
-                    value=self.DEFAULT_URLS[ProviderKind.OPENROUTER],
+                    value=self.DEFAULT_URLS[ProviderKind.LM_STUDIO],
                     id="provider-url",
                 )
             with Horizontal(classes="model-row"):
@@ -358,10 +374,10 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                 )
             with Horizontal(classes="model-row"):
                 yield Label("API-key env variable", classes="field-label")
-                yield Input(placeholder="OPENROUTER_API_KEY", id="api-key-env")
+                yield Input(placeholder="PROVIDER_API_KEY", id="api-key-env")
             with Horizontal(classes="model-row"):
                 yield Label("Max context tokens", classes="field-label")
-                yield Input(value="32768", id="context-tokens", type="integer")
+                yield Input(value=str(LOCAL_CONTEXT_TOKENS), id="context-tokens", type="integer")
             with Horizontal(classes="model-option"):
                 yield Checkbox(
                     "Expose secrets to this LLM (loopback endpoints only)",
@@ -376,13 +392,13 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "provider-kind" or not isinstance(event.value, ProviderKind):
             return
-        self.query_one("#provider-url", Input).value = self.DEFAULT_URLS[event.value]
+        self.query_one("#provider-url", Input).value = self.DEFAULT_URLS.get(event.value, "")
         default_name = {
             ProviderKind.LM_STUDIO: "local",
-            ProviderKind.OPENROUTER: "openrouter",
             ProviderKind.OPENAI_COMPATIBLE: "custom",
         }[event.value]
         self.query_one("#preset-name", Input).value = default_name
+        self.query_one("#context-tokens", Input).value = str(_context_default(event.value))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel-model":
@@ -466,7 +482,7 @@ class ModelPickerScreen(ModalScreen[ModelPickerResult | None]):
     def compose(self) -> ComposeResult:
         options = [
             Option(
-                f"{preset.name}  ·  {preset.provider}  ·  {preset.model}\n"
+                f"{preset.name}  ·  {_provider_label(preset.provider)}  ·  {preset.model}\n"
                 f"    {preset.base_url}"
             )
             for preset in self._presets
@@ -661,6 +677,7 @@ class ChatScreen(Screen[None]):
         ("/info", "info"),
         ("/model", "model"),
         ("/models", "models"),
+        ("/new", "new"),
         ("/history", "history"),
         ("/resume", "resume"),
         ("/language", "language"),
@@ -684,6 +701,7 @@ class ChatScreen(Screen[None]):
         "info": ("router and session info", "информация о роутере и сессии"),
         "model": ("add or edit a model", "добавить или изменить модель"),
         "models": ("choose a saved model", "выбрать сохранённую модель"),
+        "new": ("start a new chat", "создать новый чат"),
         "history": ("browse saved sessions", "просмотреть сохранённые сессии"),
         "resume": ("resume a saved session", "возобновить сохранённую сессию"),
         "language": ("change interface language", "изменить язык интерфейса"),
@@ -790,11 +808,14 @@ class ChatScreen(Screen[None]):
     #mode-line { height: 3; padding: 1 3; color: #6fd3df; background: #090909; }
     #interaction-panel {
         display: none;
+        dock: bottom;
+        width: 100%;
         height: auto;
         max-height: 22;
         padding: 1 3;
         border-top: solid #5b6268;
         background: #090909;
+        layer: interaction;
         scrollbar-color: #5b6268;
     }
     .interaction-view { display: none; height: auto; }
@@ -885,27 +906,26 @@ class ChatScreen(Screen[None]):
                     yield Label("Provider", id="inline-provider-label", classes="inline-label")
                     yield Select(
                         (
-                            ("Local — LM Studio", ProviderKind.LM_STUDIO),
-                            ("OpenRouter", ProviderKind.OPENROUTER),
-                            ("Custom OpenAI-compatible", ProviderKind.OPENAI_COMPATIBLE),
+                            ("Local model — LM Studio / Ollama / ai.local", ProviderKind.LM_STUDIO),
+                            ("OpenAI-compatible provider", ProviderKind.OPENAI_COMPATIBLE),
                         ),
-                        value=ProviderKind.OPENROUTER,
+                        value=ProviderKind.LM_STUDIO,
                         allow_blank=False,
                         id="inline-provider-kind",
                     )
                 for label, widget_id, value, placeholder, password in (
-                    ("Preset name", "inline-preset-name", "openrouter", "", False),
+                    ("Preset name", "inline-preset-name", "local", "", False),
                     (
                         "Base URL",
                         "inline-provider-url",
-                        ModelWizardScreen.DEFAULT_URLS[ProviderKind.OPENROUTER],
+                        ModelWizardScreen.DEFAULT_URLS[ProviderKind.LM_STUDIO],
                         "",
                         False,
                     ),
                     ("Model", "inline-model-name", "", "provider/model-name", False),
                     ("API key", "inline-api-key", "", "saved encrypted", True),
-                    ("API-key env", "inline-api-key-env", "", "OPENROUTER_API_KEY", False),
-                    ("Max context", "inline-context-tokens", "32768", "", False),
+                    ("API-key env", "inline-api-key-env", "", "PROVIDER_API_KEY", False),
+                    ("Max context", "inline-context-tokens", str(LOCAL_CONTEXT_TOKENS), "", False),
                 ):
                     with Horizontal(classes="inline-row"):
                         yield Label(label, id=f"{widget_id}-label", classes="inline-label")
@@ -1020,13 +1040,15 @@ class ChatScreen(Screen[None]):
         ):
             return
         self.query_one("#inline-provider-url", Input).value = (
-            ModelWizardScreen.DEFAULT_URLS[event.value]
+            ModelWizardScreen.DEFAULT_URLS.get(event.value, "")
         )
         self.query_one("#inline-preset-name", Input).value = {
             ProviderKind.LM_STUDIO: "local",
-            ProviderKind.OPENROUTER: "openrouter",
             ProviderKind.OPENAI_COMPATIBLE: "custom",
         }[event.value]
+        self.query_one("#inline-context-tokens", Input).value = str(
+            _context_default(event.value)
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -1084,13 +1106,23 @@ class ChatScreen(Screen[None]):
         self._close_inline()
 
     def action_clear_chat(self) -> None:
+        self._reset_chat("Чат очищен." if self._language is Language.RU else "Chat cleared.")
+
+    def action_new_chat(self) -> None:
+        self._reset_chat(
+            "Новый чат создан."
+            if self._language is Language.RU
+            else "New chat started."
+        )
+
+    def _reset_chat(self, message: str) -> None:
         self.query_one("#transcript", RichLog).clear()
         self._transcript_group = None
         self._session = None
         clear_history = getattr(self._agent, "clear_history", None)
         if callable(clear_history):
             clear_history()
-        self._write_system(tr(self._language, "chat.cleared"))
+        self._write_system(message)
 
     def action_copy_transcript(self) -> None:
         transcript = self.query_one("#transcript", TranscriptLog)
@@ -1183,7 +1215,7 @@ class ChatScreen(Screen[None]):
         self._model_picker_presets = presets
         options = [
             Option(
-                f"{preset.name}  ·  {preset.provider}  ·  {preset.model}\n"
+                f"{preset.name}  ·  {_provider_label(preset.provider)}  ·  {preset.model}\n"
                 f"    {preset.base_url}"
             )
             for preset in presets
@@ -1393,7 +1425,7 @@ class ChatScreen(Screen[None]):
         command = command.lower()
         if command == "/help":
             self._write_system(
-                "/help  /info  /tools  /model  /models [name]  /history  /resume [id]  "
+                "/help  /info  /tools  /model  /models [name]  /new  /history  /resume [id]  "
                 "/language [en|ru]  "
                 "/pppoe  /bridge  /ip-address  /address-list  /dhcp  /dns  "
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
@@ -1414,6 +1446,8 @@ class ChatScreen(Screen[None]):
             self._show_model_form()
         elif command == "/models":
             self._show_models(argument.strip())
+        elif command == "/new":
+            self.action_new_chat()
         elif command == "/history":
             self._show_sessions()
         elif command == "/resume":
@@ -1678,7 +1712,9 @@ class ChatScreen(Screen[None]):
         if callable(set_progress_sink):
             set_progress_sink(self._render_event)
         self._refresh_header()
-        self._write_system(f"Model selected: {preset.model} via {preset.provider}.")
+        self._write_system(
+            f"Model selected: {preset.model} via {_provider_label(preset.provider)}."
+        )
         if preset.allow_sensitive_tool_data:
             self._write_system(
                 "Local privacy override active: sensitive MCP fields are visible to this "
@@ -2280,7 +2316,7 @@ class ChatScreen(Screen[None]):
             if self._language is Language.RU
             else "not selected · /model"
         )
-        provider = str(self._preset.provider) if self._preset else "—"
+        provider = _provider_label(self._preset.provider) if self._preset else "—"
         labels = (
             (
                 "Модель",
