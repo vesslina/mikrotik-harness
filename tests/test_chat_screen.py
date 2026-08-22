@@ -181,6 +181,73 @@ def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_tab_enters_high_risk_only_after_preflight_and_exits_by_explicit_commit(tmp_path) -> None:
+    async def scenario() -> None:
+        class Session:
+            class Ssh:
+                command_count = 0
+
+            ssh = Ssh()
+
+            async def commit_and_close(self):
+                return True
+
+            async def abort_and_close(self):
+                return None
+
+        class HighRiskService:
+            def __init__(self) -> None:
+                self.session = Session()
+                self.calls = 0
+
+            async def enter(self, _router_id):
+                self.calls += 1
+                return self.session
+
+        class Runner(_Runner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.executors = []
+
+            def set_high_risk_executor(self, executor) -> None:
+                self.executors.append(executor)
+
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        runner = Runner()
+        service = HighRiskService()
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: runner,
+            high_risk_service=service,
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.press("tab")
+            await app.workers.wait_for_complete()
+
+            assert service.calls == 1
+            assert runner.executors == [service.session]
+            assert "HIGH RISK" in str(screen.query_one("#mode-line", Static).content)
+            assert screen.query_one("#mode-line", Static).has_class("high-risk")
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert screen.query_one("#interaction-panel").display is True
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+
+            assert runner.executors[-1] is None
+            assert "PLAN" in str(screen.query_one("#mode-line", Static).content)
+
+    asyncio.run(scenario())
+
+
 def test_model_command_opens_wizard(tmp_path) -> None:
     async def scenario() -> None:
         preset_path = tmp_path / "providers.json"

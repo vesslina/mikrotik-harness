@@ -40,6 +40,23 @@ class ConfigPaths:
     def audit_log(self) -> Path:
         return self.root / "audit.ndjson"
 
+    @property
+    def ssh_hosts(self) -> Path:
+        """Private SSH TOFU records, kept separate from MikroMCP's strict schema."""
+
+        return self.root / "ssh-hosts.yaml"
+
+
+@dataclass(frozen=True, slots=True)
+class SshTarget:
+    """Private connection details for the dedicated HIGH RISK SSH transport."""
+
+    router_id: str
+    host: str
+    port: int
+    username: str
+    password: str = field(repr=False)
+
 
 class MikroMcpConfigStore:
     OPERATOR_ID = "mth-operator"
@@ -85,6 +102,77 @@ class MikroMcpConfigStore:
 
         self._ensure_operator_policy()
         return self._load_dotenv()
+
+    def ssh_target(self, router_id: str) -> SshTarget:
+        """Resolve SSH credentials locally without exposing them to UI or model context."""
+
+        routers = self._load_yaml(self.paths.routers, "routers")
+        entry = routers.get(router_id)
+        if not isinstance(entry, dict):
+            raise ValueError(f"Router {router_id!r} is not registered")
+        host = entry.get("host")
+        credentials = entry.get("credentials")
+        if not isinstance(host, str) or not host.strip() or not isinstance(credentials, dict):
+            raise ValueError(f"Router {router_id!r} has an invalid SSH configuration")
+        prefix = credentials.get("envPrefix")
+        if not isinstance(prefix, str) or not prefix:
+            raise ValueError(f"Router {router_id!r} has no credential environment prefix")
+        environment = self._load_dotenv()
+        username = environment.get(f"{prefix}_USER")
+        password = environment.get(f"{prefix}_PASS")
+        if not username or not password:
+            raise ValueError(f"Router {router_id!r} has no saved SSH credentials")
+        raw_port = entry.get("sshPort", 22)
+        if not isinstance(raw_port, int) or not 1 <= raw_port <= 65535:
+            raise ValueError(f"Router {router_id!r} has an invalid SSH port")
+        return SshTarget(router_id, host.strip(), raw_port, username, password)
+
+    def ssh_trust(self, router_id: str) -> tuple[str, str] | None:
+        """Return canonical public key and SHA-256 hex fingerprint for one router."""
+
+        hosts = self._load_yaml(self.paths.ssh_hosts, "hosts")
+        entry = hosts.get(router_id)
+        if not isinstance(entry, dict):
+            return None
+        public_key = entry.get("publicKey")
+        fingerprint = entry.get("fingerprint")
+        if not isinstance(public_key, str) or not isinstance(fingerprint, str):
+            return None
+        return public_key, self._normalize_fingerprint(fingerprint)
+
+    def trust_ssh_host(
+        self,
+        router_id: str,
+        *,
+        port: int,
+        fingerprint: str,
+        public_key: str,
+    ) -> None:
+        """Persist a manually confirmed SSH host key for AsyncSSH and MikroMCP."""
+
+        normalized = self._normalize_fingerprint(fingerprint)
+        is_sha256_hex = len(normalized) == 64 and all(
+            character in "0123456789abcdef" for character in normalized
+        )
+        if not is_sha256_hex:
+            raise ValueError("SSH fingerprint must be a SHA-256 hexadecimal digest")
+        if not public_key.strip().startswith("ssh-"):
+            raise ValueError("SSH public key must be in OpenSSH format")
+        routers = self._load_yaml(self.paths.routers, "routers")
+        entry = routers.get(router_id)
+        if not isinstance(entry, dict):
+            raise ValueError(f"Router {router_id!r} is not registered")
+        entry["sshPort"] = port
+        entry["sshFingerprint"] = normalized
+        self._write_yaml(self.paths.routers, {"routers": routers})
+
+        hosts = self._load_yaml(self.paths.ssh_hosts, "hosts")
+        hosts[router_id] = {
+            "port": port,
+            "fingerprint": normalized,
+            "publicKey": public_key.strip(),
+        }
+        self._write_yaml(self.paths.ssh_hosts, {"hosts": hosts})
 
     def persist(self, pending: PendingRegistration) -> dict[str, str]:
         self.paths.root.mkdir(parents=True, exist_ok=True)

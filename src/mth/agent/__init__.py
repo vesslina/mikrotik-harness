@@ -22,7 +22,7 @@ from mth.agent.events import (
     ToolResult,
     VerificationResult,
 )
-from mth.agent.loop import AgentMode, ProviderWarmup, ReadOnlyAgentLoop
+from mth.agent.loop import AgentMode, HighRiskSshExecutor, ProviderWarmup, ReadOnlyAgentLoop
 from mth.agent.presets import PresetPaths, ProviderPresetStore
 from mth.agent.providers import (
     ChatProvider,
@@ -46,6 +46,7 @@ __all__ = [
     "CapabilityMismatchError",
     "FinalOutcome",
     "FinalSummary",
+    "HighRiskSshExecutor",
     "ModelCapabilities",
     "OpenAICompatibleClient",
     "PlannedAction",

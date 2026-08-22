@@ -581,3 +581,83 @@ def test_agent_writes_short_report_after_approved_change() -> None:
         assert "добавлен" in events[0].text
 
     asyncio.run(scenario())
+
+
+def test_high_risk_executes_raw_mcp_writes_and_persistent_ssh_without_proposal() -> None:
+    async def scenario() -> None:
+        class Backend:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, object] | None]] = []
+
+            async def list_tools(self) -> tuple[McpTool, ...]:
+                schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+                return (
+                    McpTool("manage_ip_address", None, schema, {"readOnlyHint": False}),
+                    McpTool("list_ip_addresses", None, schema, {"readOnlyHint": True}),
+                )
+
+            async def call_tool(self, name, arguments=None) -> McpToolResult:
+                self.calls.append((name, dict(arguments) if arguments else None))
+                return McpToolResult(("address added",), {"changed": True}, False)
+
+        class Executor:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, int, int]] = []
+
+            async def execute(self, command, timeout_seconds=20, max_output_bytes=65_536):
+                self.commands.append((command, timeout_seconds, max_output_bytes))
+                return McpToolResult(("ether1",), {"status": "ok"}, False)
+
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, tools=()):
+                self.calls += 1
+                names = {tool.name for tool in tools}
+                assert {"manage_ip_address", "ssh_exec", "propose_typed_manage_ip_address"} <= names
+                if self.calls == 1:
+                    return ProviderReply(
+                        "I will make and verify the requested change.",
+                        (
+                            ProviderToolCall(
+                                "write-1",
+                                "manage_ip_address",
+                                {"action": "add", "address": "10.0.0.1/24"},
+                            ),
+                            ProviderToolCall(
+                                "ssh-1",
+                                "ssh_exec",
+                                {"command": "/interface print"},
+                            ),
+                        ),
+                    )
+                return ProviderReply("Изменение выполнено и проверено.", ())
+
+        backend = Backend()
+        executor = Executor()
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=backend,
+            router_id="mikrotik-afe23e",
+        )
+        loop.set_high_risk_executor(executor)
+
+        events = await loop.run("Add an address", AgentMode.HIGH_RISK)
+
+        assert backend.calls == [
+            (
+                "manage_ip_address",
+                {
+                    "action": "add",
+                    "address": "10.0.0.1/24",
+                    "routerId": "mikrotik-afe23e",
+                },
+            )
+        ]
+        assert executor.commands == [("/interface print", 20, 65_536)]
+        assert not any(isinstance(event, RunbookProposal) for event in events)
+        assert any(isinstance(event, ToolResult) for event in events)
+
+    asyncio.run(scenario())

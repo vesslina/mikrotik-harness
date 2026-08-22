@@ -49,6 +49,14 @@ from mth.agent import (
     VerificationResult,
 )
 from mth.agent.tool_catalog import ToolCatalogRouter
+from mth.core.high_risk import (
+    HighRiskError,
+    HighRiskService,
+    HighRiskSession,
+    HostKeyMismatchError,
+    SshHostKey,
+    SshTrustRequired,
+)
 from mth.core.mcp_client import MikroMcpClient
 from mth.core.registration import MikroMcpConfigStore, RegistrationResult
 from mth.core.runbooks import (
@@ -806,6 +814,7 @@ class ChatScreen(Screen[None]):
         background: #090909;
     }
     #mode-line { height: 3; padding: 1 3; color: #6fd3df; background: #090909; }
+    #mode-line.high-risk { color: #ff5c57; text-style: bold; }
     #interaction-panel {
         display: none;
         dock: bottom;
@@ -853,6 +862,7 @@ class ChatScreen(Screen[None]):
         history_store: RunbookHistoryStore | None = None,
         settings_store: UiSettingsStore | None = None,
         session_store: ChatSessionStore | None = None,
+        high_risk_service: HighRiskService | None = None,
         language: Language | None = None,
     ) -> None:
         super().__init__()
@@ -865,6 +875,7 @@ class ChatScreen(Screen[None]):
         self._history = history_store or RunbookHistoryStore()
         self._settings = settings_store or UiSettingsStore()
         self._sessions = session_store or ChatSessionStore()
+        self._high_risk_service = high_risk_service or HighRiskService()
         self._language = language or self._settings.language()
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
@@ -880,6 +891,7 @@ class ChatScreen(Screen[None]):
         self._interaction: str | None = None
         self._approval_callback: Callable[[bool | None], None] | None = None
         self._approval_amend: Callable[[], None] | None = None
+        self._choice_callback: Callable[[int | None], None] | None = None
         self._runbook_form_definition: RunbookDefinition | None = None
         self._runbook_draft: RunbookSubmission | None = None
         self._model_picker_presets: tuple[ProviderPreset, ...] = ()
@@ -892,6 +904,7 @@ class ChatScreen(Screen[None]):
         self._session: ChatSession | None = None
         self._session_picker_sessions: tuple[ChatSession, ...] = ()
         self._transcript_group: str | None = None
+        self._high_risk_session: HighRiskSession | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
@@ -1091,8 +1104,13 @@ class ChatScreen(Screen[None]):
                 input_widget.value = matches[0][0] + " "
                 input_widget.cursor_position = len(input_widget.value)
             return
-        self._mode = AgentMode.READY if self._mode is AgentMode.PLAN else AgentMode.PLAN
-        self._refresh_mode()
+        if self._mode is AgentMode.PLAN:
+            self._mode = AgentMode.READY
+            self._refresh_mode()
+        elif self._mode is AgentMode.READY:
+            self._begin_high_risk_entry()
+        else:
+            self._show_high_risk_exit()
 
     def action_cancel_interaction(self) -> None:
         if self._interaction is None:
@@ -1102,6 +1120,12 @@ class ChatScreen(Screen[None]):
             self._close_inline()
             if callback is not None:
                 callback(False)
+            return
+        if self._interaction == "choice":
+            callback = self._choice_callback
+            self._close_inline()
+            if callback is not None:
+                callback(None)
             return
         self._close_inline()
 
@@ -1168,6 +1192,7 @@ class ChatScreen(Screen[None]):
         self._interaction = None
         self._approval_callback = None
         self._approval_amend = None
+        self._choice_callback = None
         input_widget = self.query_one("#chat-input", Input)
         input_widget.disabled = False
         input_widget.focus()
@@ -1319,7 +1344,31 @@ class ChatScreen(Screen[None]):
             "approval", "#inline-approval-view", "#inline-approval-options"
         )
 
+    def _show_choice(
+        self,
+        *,
+        title: str,
+        summary: str,
+        options: tuple[str, ...],
+        callback: Callable[[int | None], None],
+    ) -> None:
+        """Show a keyboard-only explicit choice in the composer replacement area."""
+
+        self._choice_callback = callback
+        self.query_one("#inline-approval-title", Static).update(title)
+        self.query_one("#inline-approval-summary", Static).update(summary)
+        option_list = self.query_one("#inline-approval-options", OptionList)
+        option_list.clear_options()
+        option_list.add_options(Option(option) for option in options)
+        option_list.highlighted = 0
+        self._show_inline("choice", "#inline-approval-view", "#inline-approval-options")
+
     def _choose_inline_approval(self, index: int) -> None:
+        choice_callback = self._choice_callback
+        if choice_callback is not None:
+            self._close_inline()
+            choice_callback(index)
+            return
         callback = self._approval_callback
         amend = self._approval_amend
         if index == 1 and amend is not None:
@@ -1330,6 +1379,270 @@ class ChatScreen(Screen[None]):
         self._close_inline()
         if callback is not None:
             callback(approved)
+
+    def _begin_high_risk_entry(self) -> None:
+        """Begin the deliberately visible SSH/backup pre-flight from READY mode."""
+
+        self._enter_high_risk()
+
+    @work(exclusive=True, group="high-risk", exit_on_error=False)
+    async def _enter_high_risk(self) -> None:
+        input_widget = self.query_one("#chat-input", Input)
+        input_widget.disabled = True
+        self.query_one("#mode-line", Static).update("◌ Preparing HIGH RISK safety net…")
+        try:
+            session = await self._high_risk_service.enter(self.profile.router_id)
+        except SshTrustRequired as error:
+            key = error.host_key
+            self._show_choice(
+                title=(
+                    "Confirm SSH host key"
+                    if self._language is Language.EN
+                    else "Подтвердите SSH host key"
+                ),
+                summary=(
+                    f"Router: {key.host}:{key.port}\nAlgorithm: {key.algorithm}\n"
+                    f"Fingerprint: {key.fingerprint}\n\n"
+                    "Verify this fingerprint through an independent trusted channel before "
+                    "continuing."
+                    if self._language is Language.EN
+                    else f"Роутер: {key.host}:{key.port}\nАлгоритм: {key.algorithm}\n"
+                    f"Fingerprint: {key.fingerprint}\n\n"
+                    "Сверьте fingerprint с независимым доверенным источником перед продолжением."
+                ),
+                options=(
+                    "1. Trust this SSH host key" if self._language is Language.EN
+                    else "1. Доверять этому SSH host key",
+                    "2. Cancel" if self._language is Language.EN else "2. Отмена",
+                ),
+                callback=lambda choice: self._ssh_trust_choice(key, choice),
+            )
+        except HostKeyMismatchError as error:
+            self._write_system(str(error), error=True)
+        except HighRiskError as error:
+            self._write_system(f"HIGH RISK pre-flight failed: {error}", error=True)
+        except Exception as error:
+            self._write_system(f"HIGH RISK pre-flight failed: {error}", error=True)
+        else:
+            set_executor = getattr(self._agent, "set_high_risk_executor", None)
+            if not callable(set_executor):
+                await session.abort_and_close()
+                self._write_system(
+                    "Selected agent does not support HIGH RISK mode.", error=True
+                )
+                return
+            set_executor(session)
+            self._high_risk_session = session
+            self._mode = AgentMode.HIGH_RISK
+            warning = (
+                "## HIGH RISK mode active\n\n"
+                "The model now has **unrestricted direct access** to RouterOS CLI and all "
+                "MikroMCP tools. Commands are not approved one by one. A local encrypted backup "
+                "and export were verified, and RouterOS Safe Mode is active for this SSH session. "
+                "Do not change this router in parallel through WinBox or another session: Safe "
+                "Mode can roll back those changes too."
+                if self._language is Language.EN
+                else "## Режим HIGH RISK активен\n\n"
+                "Модель получила **неограниченный прямой доступ** к CLI RouterOS и всем "
+                "инструментам MikroMCP. Каждая команда отдельно не подтверждается. Локальный "
+                "зашифрованный backup и export проверены, а в этой SSH-сессии активен Safe Mode. "
+                "Не меняйте этот роутер параллельно через WinBox или другую сессию: Safe Mode "
+                "может откатить и такие изменения."
+            )
+            self._write_transcript(markdown_to_text(warning, style="#ff8a73"), group="system")
+        finally:
+            input_widget.disabled = False
+            input_widget.focus()
+            self._refresh_mode()
+
+    def _ssh_trust_choice(self, host_key: SshHostKey, choice: int | None) -> None:
+        if choice != 0:
+            self._write_system(
+                "HIGH RISK entry cancelled; SSH host key was not trusted."
+                if self._language is Language.EN
+                else "Вход в HIGH RISK отменён: SSH host key не был подтверждён."
+            )
+            return
+        try:
+            self._high_risk_service.trust_host_key(host_key)
+        except (OSError, ValueError) as trust_error:
+            self._write_system(f"Could not save SSH trust record: {trust_error}", error=True)
+            return
+        self._begin_high_risk_entry()
+
+    def _show_high_risk_exit(self) -> None:
+        if self._high_risk_session is None:
+            self._mode = AgentMode.PLAN
+            self._refresh_mode()
+            return
+        self._show_choice(
+            title=(
+                "Leave HIGH RISK mode?"
+                if self._language is Language.EN
+                else "Выйти из HIGH RISK?"
+            ),
+            summary=(
+                "Choose explicitly. Commit keeps all changes made in this SSH session. Abort "
+                "sends Ctrl+D so RouterOS Safe Mode rolls them back. The harness will never send "
+                "/quit while this decision is unresolved."
+                if self._language is Language.EN
+                else "Сделайте явный выбор. Commit сохранит изменения этой SSH-сессии. Abort "
+                "отправит Ctrl+D, и RouterOS Safe Mode их откатит. Пока решение не принято, "
+                "Harness никогда не отправит /quit."
+            ),
+            options=(
+                "1. Commit and exit"
+                if self._language is Language.EN
+                else "1. Commit и выйти",
+                "2. Abort and roll back"
+                if self._language is Language.EN
+                else "2. Abort и откатить",
+                "3. Keep HIGH RISK open"
+                if self._language is Language.EN
+                else "3. Остаться в HIGH RISK",
+            ),
+            callback=self._high_risk_exit_choice,
+        )
+
+    def _high_risk_exit_choice(self, choice: int | None) -> None:
+        if choice == 0:
+            self._leave_high_risk(commit=True)
+        elif choice == 1:
+            self._leave_high_risk(commit=False)
+        else:
+            self._write_system(
+                "HIGH RISK remains active."
+                if self._language is Language.EN
+                else "HIGH RISK остаётся активен."
+            )
+
+    @work(exclusive=True, group="high-risk", exit_on_error=False)
+    async def _leave_high_risk(self, commit: bool) -> None:
+        session = self._high_risk_session
+        if session is None:
+            return
+        self.query_one("#chat-input", Input).disabled = True
+        self.query_one("#mode-line", Static).update(
+            "◌ Committing HIGH RISK session…" if commit else "◌ Rolling back Safe Mode session…"
+        )
+        try:
+            if commit:
+                if not await session.commit_and_close():
+                    self._write_system(
+                        "Safe Mode release was not verified; HIGH RISK remains active.", error=True
+                    )
+                    return
+                message = (
+                    "HIGH RISK changes were committed and the SSH session was closed."
+                    if self._language is Language.EN
+                    else "Изменения HIGH RISK зафиксированы, SSH-сессия закрыта."
+                )
+            else:
+                await session.abort_and_close()
+                message = (
+                    "HIGH RISK session was aborted; RouterOS Safe Mode was asked to roll back."
+                    if self._language is Language.EN
+                    else "Сессия HIGH RISK прервана; RouterOS Safe Mode получил команду отката."
+                )
+            set_executor = getattr(self._agent, "set_high_risk_executor", None)
+            if callable(set_executor):
+                set_executor(None)
+            self._high_risk_session = None
+            self._mode = AgentMode.PLAN
+            self._write_system(message)
+        except HighRiskError as error:
+            self._write_system(f"Could not close HIGH RISK session: {error}", error=True)
+        finally:
+            self.query_one("#chat-input", Input).disabled = False
+            self.query_one("#chat-input", Input).focus()
+            self._refresh_mode()
+
+    def _start_high_risk_restore(self) -> None:
+        if self._high_risk_session is None:
+            self._write_system("No active HIGH RISK backup session is available.", error=True)
+            return
+        self._show_choice(
+            title="Restore the pre-flight full backup?"
+            if self._language is Language.EN
+            else "Восстановить полный pre-flight backup?",
+            summary=(
+                "This uses only the local .backup created before HIGH RISK was unlocked. "
+                "RouterOS will reboot immediately and network connectivity will be interrupted."
+                if self._language is Language.EN
+                else "Будет использован только локальный .backup, созданный до входа в HIGH RISK. "
+                "RouterOS немедленно перезагрузится, а подключение к сети кратко пропадёт."
+            ),
+            options=(
+                "1. Continue to the second confirmation"
+                if self._language is Language.EN
+                else "1. Перейти ко второму подтверждению",
+                "2. Cancel" if self._language is Language.EN else "2. Отмена",
+            ),
+            callback=self._high_risk_restore_first_choice,
+        )
+
+    def _high_risk_restore_first_choice(self, choice: int | None) -> None:
+        if choice != 0:
+            self._write_system(
+                "Full backup restore cancelled."
+                if self._language is Language.EN
+                else "Восстановление полного backup отменено."
+            )
+            return
+        self._show_choice(
+            title="Final confirmation: reboot RouterOS now?"
+            if self._language is Language.EN
+            else "Последнее подтверждение: перезагрузить RouterOS сейчас?",
+            summary=(
+                "The pre-flight binary backup will be loaded now. The router will reboot "
+                "immediately and the SSH session will disappear."
+                if self._language is Language.EN
+                else "Сейчас будет загружен бинарный pre-flight backup. Роутер немедленно "
+                "перезагрузится, и SSH-сессия исчезнет."
+            ),
+            options=(
+                "1. Restore and reboot now"
+                if self._language is Language.EN
+                else "1. Восстановить и перезагрузить сейчас",
+                "2. Cancel" if self._language is Language.EN else "2. Отмена",
+            ),
+            callback=self._high_risk_restore_second_choice,
+        )
+
+    def _high_risk_restore_second_choice(self, choice: int | None) -> None:
+        if choice == 0:
+            self._restore_high_risk_backup()
+
+    @work(exclusive=True, group="high-risk", exit_on_error=False)
+    async def _restore_high_risk_backup(self) -> None:
+        session = self._high_risk_session
+        if session is None:
+            return
+        self.query_one("#chat-input", Input).disabled = True
+        self.query_one("#mode-line", Static).update(
+            "◌ Restoring full backup and rebooting RouterOS…"
+        )
+        try:
+            await session.restore_full_backup()
+        except HighRiskError as error:
+            self._write_system(f"Full backup restore failed: {error}", error=True)
+        else:
+            set_executor = getattr(self._agent, "set_high_risk_executor", None)
+            if callable(set_executor):
+                set_executor(None)
+            self._high_risk_session = None
+            self._mode = AgentMode.PLAN
+            self._write_system(
+                "Full backup restore was submitted. RouterOS is rebooting; reconnect after it "
+                "returns."
+                if self._language is Language.EN
+                else "Восстановление полного backup отправлено. RouterOS перезагружается; "
+                "подключитесь снова после его запуска."
+            )
+        finally:
+            self.query_one("#chat-input", Input).disabled = False
+            self.query_one("#chat-input", Input).focus()
+            self._refresh_mode()
 
     def _show_runbook_form(
         self,
@@ -1431,11 +1744,11 @@ class ChatScreen(Screen[None]):
                 "/nat  /services  /wireguard  /rollback [execution|journal]  "
                 "/log  /copy  /clear  /exit\n"
                 + (
-                    "Tab переключает PLAN и READY. Изменения доступны только через "
-                    "подтверждённые runbook'и."
+                    "Tab переключает PLAN, READY и HIGH RISK. В HIGH RISK доступны прямой "
+                    "CLI и все инструменты без подтверждения каждой команды."
                     if self._language is Language.RU
-                    else "Tab cycles PLAN and READY. Writes are available only through "
-                    "approved runbooks."
+                    else "Tab cycles PLAN, READY and HIGH RISK. HIGH RISK exposes direct CLI "
+                    "and all tools without per-command approval."
                 )
             )
         elif command == "/info":
@@ -1461,7 +1774,7 @@ class ChatScreen(Screen[None]):
             else:
                 self._show_language_picker()
         elif definition := self._runbooks.for_command(command):
-            if self._mode is not AgentMode.READY:
+            if self._mode not in {AgentMode.READY, AgentMode.HIGH_RISK}:
                 self._write_system(
                     f"{definition.title} is an approved runbook. "
                     "Press Tab to enter READY first.",
@@ -1480,7 +1793,10 @@ class ChatScreen(Screen[None]):
         elif command == "/clear":
             self.action_clear_chat()
         elif command == "/exit":
-            self.app.pop_screen()
+            if self._mode is AgentMode.HIGH_RISK:
+                self._show_high_risk_exit()
+            else:
+                self.app.pop_screen()
         else:
             self._write_system(f"Unknown command: {command}. Use /help.", error=True)
 
@@ -2012,6 +2328,15 @@ class ChatScreen(Screen[None]):
                 self._write_system(f"Could not update session: {error}", error=True)
 
     def _start_rollback(self, token: str) -> None:
+        if self._mode is AgentMode.HIGH_RISK:
+            if token:
+                self._write_system(
+                    "HIGH RISK /rollback restores only its pre-flight full backup; no ID is used.",
+                    error=True,
+                )
+                return
+            self._start_high_risk_restore()
+            return
         if self._mode is not AgentMode.READY:
             self._write_system("Press Tab to enter READY before rollback.", error=True)
             return
@@ -2353,12 +2678,17 @@ class ChatScreen(Screen[None]):
         )
 
     def _refresh_mode(self) -> None:
-        label = (
-            tr(self._language, "chat.plan")
-            if self._mode is AgentMode.PLAN
-            else tr(self._language, "chat.ready")
-        )
-        self.query_one("#mode-line", Static).update(
+        mode_line = self.query_one("#mode-line", Static)
+        if self._mode is AgentMode.PLAN:
+            label = tr(self._language, "chat.plan")
+        elif self._mode is AgentMode.READY:
+            label = tr(self._language, "chat.ready")
+        else:
+            session = self._high_risk_session
+            action_count = session.ssh.command_count if session is not None else 0
+            label = f"{tr(self._language, 'chat.high_risk')} · SAFE · {action_count}/100 actions"
+        mode_line.set_class(self._mode is AgentMode.HIGH_RISK, "high-risk")
+        mode_line.update(
             f"▮▮ {label}  ({tr(self._language, 'chat.tab_cycle')})"
         )
 

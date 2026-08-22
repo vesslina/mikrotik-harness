@@ -104,6 +104,42 @@ def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_pa
     assert "top-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+def test_store_resolves_private_ssh_target_and_persists_separate_ssh_tofu(tmp_path) -> None:
+    store = MikroMcpConfigStore(ConfigPaths(root=tmp_path))
+    store.persist(
+        PendingRegistration(
+            router_id="mikrotik-afe23e",
+            host="192.168.56.103",
+            port=443,
+            username="admin",
+            password="router-password",
+            ros_version="7.21.5",
+            tls_fingerprint="ab" * 32,
+        )
+    )
+
+    target = store.ssh_target("mikrotik-afe23e")
+    assert (target.host, target.port, target.username, target.password) == (
+        "192.168.56.103",
+        22,
+        "admin",
+        "router-password",
+    )
+
+    public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHarnessHostKey"
+    store.trust_ssh_host(
+        "mikrotik-afe23e",
+        port=22,
+        fingerprint="cd" * 32,
+        public_key=public_key,
+    )
+
+    assert store.ssh_trust("mikrotik-afe23e") == (public_key, "cd" * 32)
+    routers = yaml.safe_load((tmp_path / "routers.yaml").read_text(encoding="utf-8"))
+    assert routers["routers"]["mikrotik-afe23e"]["sshFingerprint"] == "cd" * 32
+    assert "router-password" not in (tmp_path / "ssh-hosts.yaml").read_text(encoding="utf-8")
+
+
 def test_prepare_rejects_routeros_6_before_network_access(tmp_path) -> None:
     called = False
 

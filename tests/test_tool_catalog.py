@@ -113,3 +113,18 @@ def test_ready_catalog_exposes_all_reads_and_any_router_bound_change_as_proposal
     assert {"list_interfaces", "torch", "propose_typed_manage_container"} <= names
     assert "propose_typed_reboot" not in names
     assert "propose_typed_apply_plan" not in names
+
+
+def test_high_risk_catalog_keeps_raw_tools_and_adds_persistent_ssh() -> None:
+    router = ToolCatalogRouter()
+    schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+    catalog = (
+        McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
+        McpTool("manage_ip_address", None, schema, {"readOnlyHint": False}),
+        McpTool("run_command", None, schema, {"readOnlyHint": False}),
+    )
+
+    names = {tool.name for tool in router.high_risk_tools(catalog)}
+
+    assert {"list_interfaces", "manage_ip_address", "run_command", "ssh_exec"} <= names
+    assert "propose_typed_manage_ip_address" in names

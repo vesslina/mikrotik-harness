@@ -145,6 +145,10 @@ TEXT: dict[str, dict[Language, str]] = {
         Language.EN: "READY · reads + approved runbooks",
         Language.RU: "READY · чтение + подтверждённые runbook'и",
     },
+    "chat.high_risk": {
+        Language.EN: "HIGH RISK · direct CLI · no per-command approval",
+        Language.RU: "HIGH RISK · прямой CLI · без подтверждения каждой команды",
+    },
     "chat.tab_cycle": {Language.EN: "Tab to cycle", Language.RU: "Tab — сменить режим"},
     "inline.cancel": {Language.EN: "Cancel", Language.RU: "Отмена"},
     "inline.help": {

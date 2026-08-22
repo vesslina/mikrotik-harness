@@ -121,6 +121,55 @@ class ToolCatalogRouter:
             by_name.setdefault(tool.name, tool)
         return tuple(by_name.values())
 
+    def high_risk_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
+        """Expose the complete live catalog plus READY's helpful proposal vocabulary.
+
+        HIGH RISK deliberately does not route a direct MikroMCP write through a proposal:
+        the user has already explicitly entered the mode which removes that per-call gate.
+        Proposal tools remain available as an optional structured planning convenience.
+        """
+
+        by_name: dict[str, McpTool] = {}
+        for tool in (*catalog, *self.ready_tools(catalog), self.ssh_exec_tool):
+            by_name.setdefault(tool.name, tool)
+        return tuple(by_name.values())
+
+    @property
+    def ssh_exec_tool(self) -> McpTool:
+        return McpTool(
+            "ssh_exec",
+            (
+                "Execute exactly one RouterOS CLI line through the persistent HIGH RISK SSH "
+                "session. It has no per-command approval gate. Inspect state first and use it "
+                "only for the user's requested task; never include passwords in the command."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "One RouterOS CLI command line without line breaks",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 120,
+                        "default": 20,
+                    },
+                    "max_output_bytes": {
+                        "type": "integer",
+                        "minimum": 256,
+                        "maximum": 2000000,
+                        "default": 65536,
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            {"readOnlyHint": False, "destructiveHint": True},
+        )
+
     @classmethod
     def filter_read_only(cls, tools: Sequence[McpTool]) -> tuple[McpTool, ...]:
         return tuple(tool for tool in tools if cls.is_router_bound_read_tool(tool))
