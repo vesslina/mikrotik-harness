@@ -16,6 +16,20 @@ from mth.core.runbooks.base import (
 )
 
 _HARNESS_ARGUMENTS = frozenset({"routerId", "dryRun", "confirmationToken"})
+_SENSITIVE_ARGUMENT_NAMES = frozenset(
+    {
+        "password",
+        "passphrase",
+        "secret",
+        "privateKey",
+        "private_key",
+        "psk",
+        "token",
+        "apiKey",
+        "api_key",
+        "community",
+    }
+)
 _SETTLED_ACTIONS = frozenset(
     {
         "already_exists",
@@ -103,8 +117,7 @@ def _state_fingerprint(value: Any) -> str:
     ).hexdigest()
 
 # Scenario runbooks still provide richer forms and specialised verification.  The generic
-# proposal path intentionally follows the live catalog, however: READY must not hide a
-# RouterOS configuration capability merely because a bespoke runbook has not been written.
+# proposal path is deliberately limited to reviewed, secret-free change schemas.
 APPROVED_TYPED_CHANGE_DOMAINS: dict[str, frozenset[str]] = {
     "manage_address_list_entry": frozenset({"firewall_routing"}),
     "manage_bridge": frozenset({"interfaces"}),
@@ -160,10 +173,26 @@ def is_approval_bound_change(tool: McpTool) -> bool:
 
     properties = tool.input_schema.get("properties")
     return (
-        tool.name not in _HARNESS_CONTROL_TOOLS
+        tool.name in APPROVED_TYPED_CHANGE_DOMAINS
+        and tool.name not in _HARNESS_CONTROL_TOOLS
         and tool.annotations.get("readOnlyHint") is not True
         and isinstance(properties, dict)
         and "routerId" in properties
+        and not _has_sensitive_properties(properties)
+    )
+
+
+def _has_sensitive_properties(properties: Mapping[str, Any]) -> bool:
+    return any(
+        isinstance(name, str)
+        and (
+            name in _SENSITIVE_ARGUMENT_NAMES
+            or any(
+                marker in name.casefold()
+                for marker in ("password", "passphrase", "privatekey", "secret")
+            )
+        )
+        for name in properties
     )
 
 
@@ -376,7 +405,9 @@ def typed_proposals_for_domains(
         tool_domains = APPROVED_TYPED_CHANGE_DOMAINS.get(tool.name)
         if not is_approval_bound_change(tool):
             continue
-        if requested and tool_domains is not None and not tool_domains.intersection(requested):
+        if requested and (
+            tool_domains is None or not tool_domains.intersection(requested)
+        ):
             continue
         proposals.append(TypedChangeDefinition(tool).proposal_tool)
     return tuple(proposals)

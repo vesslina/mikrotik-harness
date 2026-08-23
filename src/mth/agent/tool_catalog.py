@@ -109,7 +109,7 @@ class ToolCatalogRouter:
         return self.filter_read_only(catalog)
 
     def ready_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
-        """Expose every safe read plus an approval wrapper for every router-bound write."""
+        """Expose every safe read plus approval wrappers for reviewed write schemas."""
 
         live = tuple(catalog)
         scenario_proposals = tuple(

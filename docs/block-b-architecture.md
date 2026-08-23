@@ -3,8 +3,9 @@
 ## Current state
 
 Block A is complete and the second major Block B pass is operational. A connected model can read
-live RouterOS state through a bounded capability pack, explain the result, and hand a supported
-change request to one of nine deterministic runbooks. The model never executes a write itself.
+live RouterOS state in PLAN, use approval-bound changes in READY, and work through the dedicated
+CLI channel in HIGH RISK. READY has nine deterministic scenario runbooks; the model never receives
+their underlying write tools directly.
 
 Implemented runbooks after Pass 2:
 
@@ -25,17 +26,17 @@ pinned backend cannot express the complete operation safely. New scenario capabi
 registering another reviewed `RunbookDefinition`; generic capability requires an explicit review
 and allowlist entry, not a relaxation of the agent boundary.
 
-READY additionally exposes a runtime typed-change layer for 25 reviewed MikroMCP write tools.
-For each selected capability domain, mth intersects a security allowlist with the live
-`tools/list` response, copies the original JSON schema into a local `propose_typed_*` tool, and
-removes `routerId`, `dryRun`, and confirmation fields. The underlying `manage_*` tool is never
-given to the model. A proposal becomes a one-step runbook and follows the same dry-run,
-confirmation-token, snapshot, journal, verification, history, and rollback lifecycle.
+READY additionally exposes a runtime typed-change layer for the reviewed MikroMCP write schemas.
+For each selected capability domain, mth intersects the live catalog with the 25-entry reviewed
+allowlist, rejects schemas containing credential fields, copies the remaining JSON schema into a
+local `propose_typed_*` tool, removes harness-owned fields, and routes the proposal through the
+same dry-run, confirmation-token, snapshot, journal, verification, history, and rollback
+lifecycle. The underlying `manage_*` tool is never given to the model.
 
-The generic layer deliberately excludes raw commands, reboot/upgrade, scripts and scheduler
-payloads, file writes, containers, SwOS blobs, and tools containing passwords/private secrets.
-Those require a dedicated workflow with stronger UI and verification; a broad approval button is
-not treated as sufficient authorization for arbitrary code or an irreversible operation.
+Raw commands, reboot/upgrade, scripts and scheduler payloads, file writes, containers, SwOS blobs,
+and tools containing passwords/private secrets require dedicated workflows with stronger UI and
+verification. A broad approval button is not sufficient authorization for arbitrary code or an
+irreversible operation.
 
 ## Dependency and runtime
 
@@ -49,8 +50,7 @@ not treated as sufficient authorization for arbitrary code or an irreversible op
 ```text
 Textual chat
   -> provider-neutral agent loop
-       -> local capability selector
-       -> filtered live MikroMCP read tools
+       -> live read-only MikroMCP tools in PLAN/READY
        -> local scenario propose_* or schema-derived propose_typed_* handoff
             -> schema-driven runbook wizard
             -> RunbookExecutor
@@ -69,8 +69,9 @@ apply verification, rollback verification, capability domains, and rollback cave
 
 ## Agent tool routing
 
-PLAN mode is genuinely tool-free and does not start MikroMCP. READY initially exposes only
-`select_router_capabilities`. The model selects up to three domains:
+PLAN mode starts the live MCP catalog and exposes all router-bound read-only tools. READY exposes
+the same read surface plus scenario and typed proposal tools. The capability selector remains a
+catalog-routing helper for focused flows; it is not the authority boundary:
 
 - overview;
 - interfaces;
@@ -81,11 +82,9 @@ PLAN mode is genuinely tool-free and does not start MikroMCP. READY initially ex
 - containers;
 - diagnostics.
 
-The harness then filters the live catalog to router-bound tools whose names are an approved read
-shape (`list_*`, `get_*`, `check_router_health`, `ping`, or `traceroute`) and whose annotations
-say `readOnlyHint=true` and not destructive. The selected domain receives only the relevant
-subset plus matching local `propose_*` tools. A live development check covered all 60 eligible
-read tools in the 122-tool catalog; individual packs contained 7–18 tools.
+The harness filters the live catalog to router-bound tools whose annotations say
+`readOnlyHint=true` and not destructive. The current CHR catalog contains 63 router-scoped read
+tools plus one harness-owned address reader; the live count is never hardcoded.
 
 Every real call is rebound to the connected `routerId`. Fleet-global tools, management tools,
 `apply_plan`, and `run_command` never reach the model. Device output is treated as untrusted data
@@ -120,9 +119,11 @@ harness's point of view.
 ## Secrets and untrusted state
 
 PPPoE passwords are collected in a masked field and injected only while assembling the approved
-apply call. They are absent from proposal schemas, dry-run steps, transcript text, plans, and
-history. This boundary is independent from the optional loopback-model setting that allows raw
-sensitive read results to enter local model context.
+specialized runbook call. They are absent from specialized proposal schemas, dry-run steps,
+transcript text, plans, and history. Generic typed schemas are limited to the reviewed allowlist
+and reject credential-shaped fields before they reach the model. This is independent from the
+optional loopback-model setting that allows raw sensitive read results to enter local model
+context.
 
 Provider API keys use a separate encrypted vault. Current-user DPAPI is preferred on Windows; a
 private Fernet key file is the portable fallback. The ciphertext is Base64-encoded for JSON, but
@@ -135,9 +136,9 @@ for later verification. Arbitrary comments, scripts, credentials, and other devi
 fields cannot silently become durable runbook state.
 
 The stdio process always uses a named `mth-operator` identity and a persistent confirmation
-secret. Its RBAC allowlist is migrated from the registered runbook catalog and contains generic
-plan/apply/rollback meta-tools plus only the reviewed write tools listed above. Nested
-`apply_plan` dispatch is checked again by the harness against the immutable definition.
+secret. Its RBAC policy is migrated from the registered catalog and is checked again by the
+harness before nested `apply_plan` dispatch. Narrowing the backend patterns to the reviewed write
+allowlist remains part of READY hardening.
 
 The model loop retains a bounded window of recent complete turns. The budget comes from the
 selected preset's context declaration with space reserved for the response. Tool traces are not

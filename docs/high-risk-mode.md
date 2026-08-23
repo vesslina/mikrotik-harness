@@ -34,7 +34,7 @@ hard stop; the UI never offers automatic replacement of a key.
 
 ## Pre-flight artifacts
 
-Before the persistent CLI PTY is opened, the Harness asks MikroMCP to create:
+Before the composer is unlocked, the Harness asks MikroMCP to create:
 
 1. a password-encrypted binary `.backup`;
 2. a textual `.rsc` export.
@@ -54,8 +54,7 @@ failure aborts entry into HIGH RISK before the composer becomes available.
 
 The registered RouterOS account needs SSH access and the `ftp` policy because SFTP is the secure
 transfer subsystem used to retrieve and restore artifacts. The SSH service must be reachable on
-the configured port (22 by default). On the current CHR lab, TCP/22 is not reachable, so enable
-SSH deliberately before attempting the first live entry; the Harness will otherwise fail closed.
+the configured port (22 by default); the Harness fails closed when it is unavailable.
 
 ## Persistent SSH and Safe Mode
 

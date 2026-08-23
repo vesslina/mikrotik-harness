@@ -18,6 +18,7 @@ from mth.agent import (
     ReasoningControl,
     RunbookProposal,
     ToolCallFormat,
+    ToolResult,
 )
 from mth.core.registration import RegistrationResult
 from mth.core.runbooks import (
@@ -165,6 +166,7 @@ def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
             assert "08:00:27:AF:E2:3E" in info
             assert "lab-model" in info
             assert "122 live" in info
+            assert screen.query_one("#connection-status", Static).display is False
             assert "PLAN" in str(screen.query_one("#mode-line", Static).content)
 
             await pilot.press("tab")
@@ -286,6 +288,34 @@ def test_tab_enters_high_risk_only_after_preflight_and_exits_by_explicit_commit(
             assert "PLAN" in str(screen.query_one("#mode-line", Static).content)
 
     asyncio.run(scenario())
+
+
+def test_chat_detects_lost_high_risk_transport() -> None:
+    lost = ToolResult(
+        call_id="ssh-1",
+        tool_name="ssh_exec",
+        content=("connection_lost",),
+        structured_content={
+            "status": "connection_lost",
+            "session_alive": False,
+            "safe_mode_active": False,
+        },
+        is_error=True,
+    )
+    healthy = ToolResult(
+        call_id="ssh-2",
+        tool_name="ssh_exec",
+        content=("name: MikroTik",),
+        structured_content={
+            "status": "ok",
+            "session_alive": True,
+            "safe_mode_active": True,
+        },
+        is_error=False,
+    )
+
+    assert ChatScreen._high_risk_transport_lost((lost,)) is True
+    assert ChatScreen._high_risk_transport_lost((healthy,)) is False
 
 
 def test_model_command_opens_wizard(tmp_path) -> None:

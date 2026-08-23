@@ -70,6 +70,7 @@ class HighRiskSession:
             "execution_time": result.execution_time,
             "output_truncated": result.output_truncated,
             "command_count": result.command_count,
+            "error_detail": result.error_detail,
         }
         content = (result.cleaned_output or result.status,)
         return McpToolResult(

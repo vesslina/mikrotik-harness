@@ -7,6 +7,7 @@ import re
 import socket
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -2497,6 +2498,8 @@ class ChatScreen(Screen[None]):
                 ):
                     continue
                 self._render_event(event)
+            if self._high_risk_transport_lost(events):
+                await self._invalidate_high_risk_session()
             if proposal is not None:
                 try:
                     definition = self._definition_for_id(proposal.runbook)
@@ -2523,6 +2526,47 @@ class ChatScreen(Screen[None]):
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_mode()
+
+    @staticmethod
+    def _high_risk_transport_lost(events: Sequence[AgentEvent]) -> bool:
+        """Return whether a direct CLI call proved the elevated channel unusable."""
+
+        for event in events:
+            if not isinstance(event, ToolResult) or event.tool_name != "ssh_exec":
+                continue
+            structured = event.structured_content
+            if not isinstance(structured, dict):
+                continue
+            status = structured.get("status")
+            alive = structured.get("session_alive")
+            if alive is False and status in {"connection_lost", "desynchronized"}:
+                return True
+        return False
+
+    async def _invalidate_high_risk_session(self) -> None:
+        """Fail closed after the persistent SSH channel disappears mid-session."""
+
+        session = self._high_risk_session
+        if session is None:
+            return
+        set_executor = getattr(self._agent, "set_high_risk_executor", None)
+        if callable(set_executor):
+            set_executor(None)
+        self._high_risk_session = None
+        self._mode = AgentMode.PLAN
+        # The transport is already gone; abort_and_close is intentionally best effort.
+        # RouterOS Safe Mode is no longer trusted and the operator must explicitly
+        # re-enter HIGH RISK after checking the device.
+        with suppress(OSError, HighRiskError):
+            await session.abort_and_close()
+        self._write_system(
+            "HIGH RISK SSH-сессия потеряна. Safe Mode больше нельзя считать активным; "
+            "режим HIGH RISK заблокирован. Проверьте роутер и войдите заново через Tab."
+            if self._language is Language.RU
+            else "HIGH RISK SSH session was lost. Safe Mode can no longer be trusted; "
+            "HIGH RISK is locked. Check the router and re-enter with Tab.",
+            error=True,
+        )
 
     async def _probe_router(self) -> bool:
         """Fail fast when the registered MikroMCP REST endpoint is unreachable."""
@@ -2766,15 +2810,12 @@ class ChatScreen(Screen[None]):
     def _refresh_connection_status(self) -> None:
         status = self.query_one("#connection-status", Static)
         if not self._router_offline or self._connection_lost_at is None:
-            status.update(
-                Text(
-                    "Connection  ✓ MikroMCP online"
-                    if self._language is not Language.RU
-                    else "Соединение  ✓ MikroMCP онлайн",
-                    style="#7fd88f",
-                )
-            )
+            # Keep the header quiet during a healthy session. The status row is
+            # reserved for an actionable red connection-loss warning.
+            status.display = False
+            status.update("")
             return
+        status.display = True
         elapsed = max(0, int((datetime.now() - self._connection_lost_at).total_seconds()))
         status.update(
             Text(

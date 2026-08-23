@@ -80,6 +80,35 @@ def test_typed_proposals_are_domain_scoped_and_dangerous_tools_stay_absent() -> 
     assert "manage_container" not in APPROVED_TYPED_CHANGE_DOMAINS
 
 
+def test_typed_proposals_require_allowlist_and_reject_secret_schemas() -> None:
+    catalog = (
+        McpTool(
+            "manage_unreviewed",
+            "Unreviewed write",
+            {
+                "type": "object",
+                "properties": {"routerId": {"type": "string"}},
+            },
+            {"readOnlyHint": False, "destructiveHint": True},
+        ),
+        McpTool(
+            "manage_route",
+            "Route with a secret field",
+            {
+                "type": "object",
+                "properties": {
+                    "routerId": {"type": "string"},
+                    "password": {"type": "string"},
+                },
+            },
+            {"readOnlyHint": False, "destructiveHint": True},
+        ),
+    )
+
+    assert typed_proposals_for_domains(catalog) == ()
+    assert typed_proposals_for_domains(catalog, ("firewall_routing",)) == ()
+
+
 def test_typed_change_uses_dry_run_for_baseline_apply_check_and_rollback_check() -> None:
     class Session:
         def __init__(self) -> None:

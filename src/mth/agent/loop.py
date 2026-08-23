@@ -587,7 +587,7 @@ class ReadOnlyAgentLoop:
             if mode is AgentMode.PLAN
             else (
                 "READY mode is active. You have the complete live read catalog and approval "
-                "wrappers for every router-bound write tool. Use read tools freely; use a "
+                "wrappers for reviewed router-bound write schemas. Use read tools freely; use a "
                 "supplied propose_* tool for changes. A supplied propose_* tool is an "
             "available change path through approval, not an absence of write capability. For "
             "example, propose_typed_manage_ip_address can add, update, or remove one exact "

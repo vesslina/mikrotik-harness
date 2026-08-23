@@ -2,13 +2,26 @@
 
 [English README](README.md)
 
-`mth` — ориентированный на безопасность harness для управления RouterOS через закреплённый
-backend MikroMCP. Проект включает Block A и рабочий Block B: поиск устройств по MNDP,
-trust-on-first-use для TLS, регистрацию backend, presets моделей, маршрутизацию read-only
-инструментов по capability packs и семь runbook'ов с dry-run, подтверждением, проверкой,
-журналом и rollback.
+`mth` — клавиатурный LLM-harness для RouterOS. Он обнаруживает MikroTik по MNDP,
+регистрирует выбранный роутер через MikroMCP и предоставляет агентский цикл для чтения
+состояния и управляемого изменения подключённого устройства.
 
-## Установка для разработки
+MikroMCP — типизированный backend RouterOS и источник живого MCP-каталога. Harness владеет
+discovery, доверием к устройству, интеграцией моделей, режимами доступа, runbook-ами,
+подтверждениями, историей и Textual UI. LLM не выбирает router ID и не получает больше прав,
+чем разрешено текущим режимом.
+
+## Требования и запуск
+
+- Python 3.11+
+- Node.js 22+
+- RouterOS 7.x с HTTPS REST через `www-ssl`
+- LM Studio, Ollama, `ai.local` или другой OpenAI-compatible endpoint
+
+MikroMCP подключён как git submodule на `v1.9.0`. Harness использует официальный Python MCP
+SDK через stdio и запускает Node.js backend дочерним процессом. Исходники submodule не изменяются;
+для RouterOS singleton-методов вроде `/ip/dns` создаётся игнорируемая compatibility-копия
+bundle с fail-closed проверкой.
 
 ```powershell
 python -m venv .venv
@@ -16,39 +29,22 @@ git submodule update --init
 npm --prefix external/mikromcp ci
 npm --prefix external/mikromcp run build
 .venv\Scripts\python -m pip install -e ".[dev]"
-```
-
-MikroMCP подключён как git submodule и закреплён на `v1.9.0`. Harness не изменяет его исходники.
-При запуске mth создаёт игнорируемую compatibility-копию `dist/mth-main.js`, исправляющую запись
-RouterOS singleton-меню вроде `/ip/dns`; при несовпадении с проверенной версией патч применяется
-fail-closed. Если npm недоступен, тот же backend можно собрать локальным `pnpm`.
-
-## Терминальный интерфейс
-
-Запуск:
-
-```powershell
 mth
 ```
 
-Discovery автоматически ищет соседей MNDP. Стрелки выбирают устройство, `Tab` перемещает фокус,
-`r` обновляет список, `q` завершает программу. Пароль RouterOS всегда вводится в masked field.
+Приватное состояние хранится в игнорируемом `.mth/`: регистрация MikroMCP, trust-записи,
+зашифрованные secrets провайдеров, история runbook-ов и recovery-артефакты HIGH RISK.
 
-- Выбор строки переносит её IP в поле подключения.
-- Первое соединение показывает SHA-256 fingerprint TLS. Его необходимо сверить с доверенным
-  источником; последующее несовпадение останавливает соединение до отправки credentials.
-- Данные сохраняются в приватной `.mth/`, которая исключена из Git.
-- Backend запускается от ограниченной identity `mth-operator`, получает живой каталог tools и
-  проверяет роутер через `check_router_health`.
-- После успешной проверки открывается чат с профилем RouterOS и количеством доступных MCP tools.
+## Discovery и регистрация
 
-Discovery и чат используют общую чёрно-красно-белую тему. Выбор темы Textual оставлен доступным,
-но базовая цветовая идентичность harness сохраняется.
+Discovery показывает MNDP-соседей: MAC, адреса, identity, RouterOS version и board. Адрес можно
+ввести вручную. Регистрация проверяет HTTPS REST, сохраняет TLS fingerprint, записывает форматы
+MikroMCP `routers.yaml`/environment, получает живой `tools/list` и проверяет
+`check_router_health` вместе с `get_system_status`. Несовпадение сохранённого fingerprint —
+жёсткая остановка.
 
-### Подготовка HTTPS REST на RouterOS
-
-RouterOS REST работает через `www-ssl`; `api-ssl` — другой бинарный API. На тестовом RouterOS 7
-можно создать локальный CA и серверный сертификат так:
+RouterOS REST работает через `www-ssl`, а `api-ssl` — отдельный бинарный API. Для тестового
+CHR:
 
 ```routeros
 /certificate add name=mth-ca common-name=mth-ca key-usage=key-cert-sign,crl-sign
@@ -58,108 +54,101 @@ RouterOS REST работает через `www-ssl`; `api-ssl` — другой 
 /ip service set www-ssl port=443 certificate=mth-https disabled=no
 ```
 
-IP должен быть стабильным management-адресом роутера. Если `api-ssl` ранее переносили на 443,
-верните его на штатный порт:
+## Режимы агента
 
-```routeros
-/ip service set api-ssl port=8729 disabled=yes
+`Tab` переключает `PLAN`, `READY` и `HIGH RISK`.
+
+### PLAN
+
+Только разведка. Harness получает живой каталог MikroMCP и передаёт модели только
+router-bound read-only инструменты. Модель может читать состояние и объяснять его, но не может
+создавать или выполнять изменения.
+
+### READY
+
+Основной режим управляемых изменений. Модель получает полный живой read-only каталог и
+harness-owned proposal-инструменты:
+
+- девять reviewed runbook-ов: PPPoE, bridge, IP address, address list, DHCP core, DNS, NAT,
+  административные сервисы и WireGuard;
+- typed proposal-ы для тех write-схем MikroMCP, которые поддержаны текущим reviewed workflow
+  harness-а.
+
+Прямые backend write-tools модели не передаются. Каждый proposal проходит:
+
+```text
+proposal → typed form → baseline → dry-run → human approval
+→ MikroMCP confirmation → apply → post-check → journal/history
+→ отдельно подтверждённый rollback
 ```
 
-Используйте отдельного пользователя RouterOS с минимальными необходимыми правами и непустым
-паролем. MNDP — недоверенное сетевое объявление; непрерывность устройства устанавливается только
-закреплённым TLS fingerprint.
+Секреты вводятся в masked form и подставляются только при сборке подтверждённого backend-вызова.
+Они не попадают в plan, transcript, model context и history. После успешной проверки модель
+формирует короткий отчёт пользователю на русском.
 
-## Чат и агент
+Каталог MikroMCP динамический и не считается фиксированным числом. Само наличие backend tool не
+делает его поддержанным READY-сценарием: чувствительные, неоткатываемые или неполные схемы
+остаются за границей поддержанного контракта до появления reviewed workflow.
 
-Шапка всегда показывает подключённый MikroTik, версию RouterOS, выбранную модель, провайдера,
-версию harness и живое количество MCP tools. Пиксельный логотип имеет смещённую терминальную
-тень в стиле классического wordmark Claude Code, сохраняя собственные красный, белый и чёрный
-цвета проекта.
+### HIGH RISK
 
-Основные команды:
+HIGH RISK — явный режим расширенных полномочий. Он сохраняет инструменты READY и добавляет
+живой каталог MikroMCP, прямые write-tools и `ssh_exec` для однострочных CLI-команд RouterOS.
+Поштучного approval нет: повышенное доверие выражается самим входом в режим.
 
-- `/model` — добавить или изменить модель.
-- `/models` — выбрать или удалить сохранённый preset вместе с его API-ключом.
-- `/language` — выбрать русский или английский; также работают `/language ru` и `/language en`.
-- `/pppoe`, `/bridge`, `/dhcp`, `/dns`, `/nat`, `/services`, `/wireguard` — открыть безопасный
-  schema-driven runbook в READY.
-- `/rollback [execution-id|journal-id]` — показать preview и откатить полное выполнение runbook.
-- `/help`, `/info`, `/log`, `/copy`, `/clear`, `/exit` — остальные команды. `/copy` или
-  `Ctrl+Shift+C` копирует весь transcript.
+До открытия composer harness:
 
-При первом запуске язык определяется по locale операционной системы. Выбранное значение хранится
-в `.mth/settings.json`. `/clear` очищает и видимый transcript, и in-process память модели.
+1. выполняет независимый SSH host-key TOFU и блокирует последующее несовпадение;
+2. создаёт через MikroMCP зашифрованный binary backup и текстовый export;
+3. скачивает их по SFTP через тот же pinned SSH transport, проверяет и сохраняет manifest в
+   `.mth/high-risk-backups/<router-id>/`;
+4. открывает постоянный AsyncSSH PTY, выполняет terminal negotiation и подтверждает prompt
+   `<SAFE>`.
 
-Все взаимодействия выполняются inline. Model form, выбор preset, runbook form, apply/rollback,
-удаление модели и язык временно заменяют composer внизу, не закрывая transcript. `Esc` отменяет
-действие, `Tab` в approval возвращает к изменению параметров. Опции «разрешить все изменения на
-сессию» нет намеренно: каждый неизменяемый план требует отдельного human approval.
+Каждая CLI-команда получает уникальный framing marker, ограничение времени и вывода и выполняется
+в том же PTY, поэтому контекст меню и Safe Mode сохраняются между вызовами. Для совместимости с
+RouterOS application keepalive AsyncSSH отключён; живость определяется TCP, framing и явным
+состоянием сессии.
 
-Сообщения пользователя отображаются на серой подложке, ответы модели остаются на чёрном фоне.
-Во время запроса видны меняющаяся activity-фраза и живое время выполнения. Точное число reasoning
-tokens показывается после ответа, если провайдер его вернул. Для non-streaming API live-счётчик
-токенов недостоверен, поэтому до ответа интерфейс честно показывает `…`. Между раундами tool calls
-появляются в transcript сразу; `Ctrl+O` раскрывает имена и привязанные аргументы инструментов.
+Выход требует явного выбора: commit и закрытие, abort с откатом Safe Mode или оставить сессию
+открытой. `/quit` не отправляется до разрешения этого выбора. `/rollback` в HIGH RISK означает
+только отдельно подтверждённое восстановление полного pre-flight `.backup`, после которого
+роутер перезагрузится и связь кратко прервётся.
 
-Текст transcript можно выделить мышью и скопировать через `Ctrl+C`. В Windows mth синхронизирует
-внутренний clipboard Textual с системным, поэтому `Ctrl+V` работает в полях даже в старом окне
-PowerShell, которое не отправляет bracketed-paste событие.
+Системный prompt HIGH RISK требует семь шагов: понять запрос, изучить состояние, спланировать,
+быстро проверить план, выполнить, проверить результат и отчитаться. Reasoning идёт на английском,
+общение с пользователем — на русском. RouterOS CLI RAG пока отложен:
+[high-risk-rag-todo.md](docs/high-risk-rag-todo.md).
 
-`Tab` в обычном composer переключает режимы:
+## Модели и команды
 
-- `PLAN` — полностью без инструментов и без запуска MikroMCP.
-- `READY` — модель сначала выбирает capability pack, затем получает только соответствующие
-  read-only tools и harness-owned `propose_*` handoffs.
+`/model` сохраняет preset локальной модели или любого OpenAI-compatible endpoint.
+Credentials хранятся отдельно в защищённом vault; `/models` выбирает или удаляет preset.
+Поддерживаются русский/английский UI, ограниченная память диалога, warm-up модели,
+нормализованные reasoning/tool events, inline approval, история сессий и копирование transcript.
 
-Модель никогда не получает backend write tools, `apply_plan` или `run_command`. Изменение идёт по
-цепочке: proposal → редактируемая форма → live dry-run → human approval → backend confirmation →
-apply → post-check → journal. Rollback требует отдельного preview и подтверждения.
+```text
+/help       справка
+/info       устройство и модель
+/model      добавить или изменить preset
+/models     выбрать или удалить preset
+/language   русский или английский
+/new        новый чат
+/history    список сессий
+/resume     последняя сессия
+/log        локальный audit transcript
+/clear      очистить transcript и память модели
+/rollback   preview и подтверждение rollback
+/exit       выйти из чата
+```
 
-## Модели и API-ключи
-
-Preset содержит URL, имя модели и capability metadata. API-ключ хранится отдельно в
-зашифрованном `.mth/provider-secrets.json`:
-
-- Windows DPAPI для текущего пользователя используется в первую очередь;
-- Fernet с приватным `.mth/provider-secrets.key` служит fallback;
-- Base64 кодирует уже зашифрованные bytes и не считается шифрованием.
-
-Именованная env-переменная, если она задана и непуста, имеет приоритет над vault. Ключи не
-попадают в `providers.json`, transcript, планы, history, логи и Git. Удаление preset удаляет и его
-vault entry.
-
-Память диалога ограничена размером контекста, указанным в preset, и сохраняет только последние
-полные пары user/assistant. Скрытые reasoning traces туда не копируются.
-
-## Границы безопасности
-
-Результаты MCP рекурсивно редактируются перед передачей внешней модели. Поля password, token,
-private key, community и похожие скрываются. Только loopback-модель может получить явное
-разрешение видеть sensitive read data.
-
-Runbook baselines имеют независимую allowlist-проекцию: произвольные комментарии, scripts и
-секреты RouterOS не становятся долговременным состоянием harness. Router ID каждого tool call
-всегда заменяется ID текущего подключённого устройства.
-
-Точные ограничения закреплённого MikroMCP описаны в
-[`docs/backend-capability-gaps.md`](docs/backend-capability-gaps.md). Сейчас нельзя честно считать
-готовыми полный DHCP network/gateway, Wi-Fi password, baseline firewall, backup/export workflow и
-изменение SSH port.
-
-## Headless discovery
+Headless discovery:
 
 ```powershell
 mth discover
 mth discover --json
-```
-
-При нескольких сетевых адаптерах можно явно передать directed broadcast:
-
-```powershell
 mth discover --broadcast 192.168.56.255
 ```
-
-MAC-only подключения RouterOS не входят в v1.
 
 ## Проверки
 
@@ -170,6 +159,7 @@ mypy src
 python -m mth --help
 ```
 
-Архитектура Block B находится в [`docs/block-b-architecture.md`](docs/block-b-architecture.md),
-трёхуровневые сценарии проверки моделей — в
-[`docs/model-evaluation-prompts-ru.md`](docs/model-evaluation-prompts-ru.md).
+Ограничения backend описаны в [docs/backend-capability-gaps.md](docs/backend-capability-gaps.md),
+архитектура Block B — в [docs/block-b-architecture.md](docs/block-b-architecture.md), а
+live-промпты для проверки моделей — в
+[docs/model-evaluation-prompts-ru.md](docs/model-evaluation-prompts-ru.md).

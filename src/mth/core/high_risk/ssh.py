@@ -14,13 +14,39 @@ from mth.core.high_risk.models import HighRiskError, SshExecResult
 from mth.core.registration import SshTarget
 
 
+class _TransportState:
+    """Last low-level reason reported by AsyncSSH for this connection."""
+
+    def __init__(self) -> None:
+        self.lost_detail: str | None = None
+
+
+class _TransportObserver(asyncssh.SSHClient):
+    """Keep AsyncSSH's disconnect reason instead of reducing it to a bare EOF."""
+
+    def __init__(self, state: _TransportState) -> None:
+        self._state = state
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is None:
+            self._state.lost_detail = "SSH transport was closed cleanly by the peer"
+        else:
+            self._state.lost_detail = f"{type(exc).__name__}: {exc}"
+
+
 class RouterOsSshSession:
     """One pinned SSH connection and one PTY which preserves RouterOS CLI state."""
 
-    _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    _ANSI = re.compile(r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~])")
+    _PROMPT = re.compile(r"^\[[^\]\r\n]+\]\s+(?:<SAFE>\s+)?")
     _MARKER_PREFIX = "__MTH_CMD_DONE_"
 
-    def __init__(self, connection: Any, process: Any) -> None:
+    def __init__(
+        self,
+        connection: Any,
+        process: Any,
+        transport_state: _TransportState | None = None,
+    ) -> None:
         self._connection = connection
         self._process = process
         self._stdin = process.stdin
@@ -30,11 +56,20 @@ class RouterOsSshSession:
         self._alive = True
         self._safe_mode_active = False
         self._command_count = 0
+        self._term_rows = 48
+        self._term_cols = 160
+        self._cursor_row = 1
+        self._cursor_col = 1
+        self._saved_cursor = (1, 1)
+        self._terminal_parse_buffer = b""
+        self._transport_state = transport_state or _TransportState()
+        self._last_transport_error: str | None = None
 
     @classmethod
     async def open(cls, target: SshTarget, known_hosts: Path) -> RouterOsSshSession:
         """Connect only through a previously written, pinned known-hosts record."""
 
+        transport_state = _TransportState()
         try:
             connection = await asyncssh.connect(
                 target.host,
@@ -42,8 +77,14 @@ class RouterOsSshSession:
                 username=target.username,
                 password=target.password,
                 known_hosts=str(known_hosts),
-                keepalive_interval=20,
-                keepalive_count_max=3,
+                # RouterOS 7.21 does not acknowledge AsyncSSH's application-level
+                # keepalive global requests consistently. AsyncSSH interprets the
+                # missing replies as a dead peer and closes a healthy transport
+                # after roughly 80 seconds. TCP plus command framing provide the
+                # liveness boundary here; a future heartbeat must be a real,
+                # harmless RouterOS CLI marker on this persistent PTY.
+                keepalive_interval=0,
+                client_factory=lambda: _TransportObserver(transport_state),
             )
             process = await connection.create_process(
                 request_pty=True,
@@ -53,7 +94,13 @@ class RouterOsSshSession:
             )
         except (asyncssh.Error, OSError) as error:
             raise HighRiskError(f"Could not open pinned SSH channel: {error}") from error
-        return cls(connection, process)
+        session = cls(connection, process, transport_state)
+        try:
+            await session._synchronise_terminal()
+        except Exception:
+            await session._close_transport()
+            raise
+        return session
 
     @property
     def safe_mode_active(self) -> bool:
@@ -80,9 +127,7 @@ class RouterOsSshSession:
                 # RouterOS treat the marker as part of the pre-Safe command,
                 # leaving us with no trustworthy <SAFE> evidence.
                 await self._write(b"\x18")
-                raw = await self._read_until_texts(
-                    ("[safe mode taken]", "<safe>"), timeout, 32_768
-                )
+                raw = await self._read_until_safe_mode(timeout, 32_768)
                 if "safe mode" in raw.casefold() and (
                     "another user" in raw.casefold()
                     or "hijack" in raw.casefold()
@@ -93,8 +138,9 @@ class RouterOsSshSession:
                 marker = self._marker()
                 await self._write(self._marker_command(marker))
                 await self._read_until_marker(marker, timeout, 32_768)
-            except (ConnectionError, TimeoutError):
-                self._alive = False
+            except (asyncssh.Error, OSError, ConnectionError, TimeoutError) as error:
+                self._last_transport_error = self._transport_diagnostic(error)
+                await self._close_transport()
                 return False
             self._safe_mode_active = "<safe>" in raw.casefold()
             return self._safe_mode_active
@@ -112,16 +158,26 @@ class RouterOsSshSession:
         started = time.monotonic()
         async with self._lock:
             if not self._alive:
-                return self._result("", "connection_lost", started, False)
+                self._safe_mode_active = False
+                return self._result(
+                    "",
+                    "connection_lost",
+                    started,
+                    False,
+                    error_detail=self._last_transport_error or "SSH session is already closed",
+                )
             marker = self._marker()
             try:
                 await self._write(command.encode("utf-8") + b"\r\n" + self._marker_command(marker))
                 raw, truncated = await self._read_until_marker(marker, timeout, max_output_bytes)
             except TimeoutError:
                 return await self._timeout_result(started, max_output_bytes)
-            except ConnectionError:
-                self._alive = False
-                return self._result("", "connection_lost", started, False)
+            except (asyncssh.Error, OSError, ConnectionError) as error:
+                detail = self._transport_diagnostic(error)
+                self._mark_transport_lost(detail)
+                return self._result(
+                    "", "connection_lost", started, False, error_detail=detail
+                )
             self._command_count += 1
             status = "truncated" if truncated else "ok"
             return self._result(raw, status, started, truncated, command=command, marker=marker)
@@ -138,7 +194,8 @@ class RouterOsSshSession:
                 raw = await self._read_until_text("safe mode released", 8, 32_768)
                 await self._write(self._marker_command(marker))
                 await self._read_until_marker(marker, 8, 32_768)
-            except (ConnectionError, TimeoutError):
+            except (asyncssh.Error, OSError, ConnectionError, TimeoutError) as error:
+                self._mark_transport_lost(self._transport_diagnostic(error))
                 return False
             released = "safe mode released" in raw.casefold() and "<safe>" not in raw.casefold()
             if released:
@@ -165,7 +222,8 @@ class RouterOsSshSession:
             self._require_alive()
             try:
                 sftp = await self._connection.start_sftp_client()
-                await sftp.put(local_backup, remote_name)
+                async with sftp:
+                    await sftp.put(local_backup, remote_name)
                 command = f"/system backup load name={remote_name} password={password}"
                 await self._write(command.encode("utf-8") + b"\r\n")
                 prompt = await self._read_until_text("restore and reboot", 15, 32_768)
@@ -184,7 +242,8 @@ class RouterOsSshSession:
 
         try:
             sftp = await self._connection.start_sftp_client()
-            await sftp.get(remote_name, local_path)
+            async with sftp:
+                await sftp.get(remote_name, local_path)
         except (asyncssh.Error, OSError) as error:
             raise HighRiskError(
                 f"Could not download RouterOS artifact {remote_name!r}: {error}"
@@ -197,9 +256,16 @@ class RouterOsSshSession:
         try:
             await self._write(b"\x03" + self._marker_command(marker))
             await self._read_until_marker(marker, 5, max_output_bytes)
-        except (ConnectionError, TimeoutError):
+        except (asyncssh.Error, OSError, ConnectionError, TimeoutError) as error:
+            self._last_transport_error = self._transport_diagnostic(error)
             await self._close_transport()
-            return self._result("", "desynchronized", started, False)
+            return self._result(
+                "",
+                "desynchronized",
+                started,
+                False,
+                error_detail=self._last_transport_error,
+            )
         return self._result("", "timeout", started, False)
 
     async def _read_until_text(
@@ -230,7 +296,7 @@ class RouterOsSshSession:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError
-            data = await asyncio.wait_for(self._stdout.read(4096), timeout=remaining)
+            data = await self._read_stdout(remaining)
             if not data:
                 raise ConnectionError("SSH stream closed")
             text = self._decode(data)
@@ -239,6 +305,40 @@ class RouterOsSshSession:
                 captured = captured[-max_output_bytes:]
             lowered = captured.casefold()
             if all(needle.casefold() in lowered for needle in needles):
+                return captured
+
+    async def _read_until_safe_mode(self, timeout: float, max_output_bytes: int) -> str:
+        """Wait for RouterOS' version-specific Safe Mode confirmation.
+
+        RouterOS 7.21 emits ``Taking Safe Mode session...`` followed by
+        ``Success!`` and a prompt containing ``<SAFE>``. Older releases use the
+        ``[Safe Mode taken]`` line. Both are valid evidence; a bare prompt is
+        intentionally not enough.
+        """
+
+        deadline = time.monotonic() + timeout
+        captured = self._pending
+        self._pending = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            data = await self._read_stdout(remaining)
+            if not data:
+                raise ConnectionError("SSH stream closed")
+            captured += self._decode(data)
+            if len(captured.encode("utf-8")) > max_output_bytes:
+                captured = captured[-max_output_bytes:]
+            lowered = captured.casefold()
+            if "safe mode" in lowered and (
+                "another user" in lowered or "hijack" in lowered
+            ):
+                raise HighRiskError(
+                    "RouterOS Safe Mode is owned by another session; refusing to hijack it"
+                )
+            if "<safe>" in lowered and (
+                "[safe mode taken]" in lowered or "success!" in lowered
+            ):
                 return captured
 
     async def _read_until_marker(
@@ -270,11 +370,190 @@ class RouterOsSshSession:
             if remaining <= 0:
                 self._pending = buffer
                 raise TimeoutError
-            data = await asyncio.wait_for(self._stdout.read(4096), timeout=remaining)
+            data = await self._read_stdout(remaining)
             if not data:
                 self._pending = buffer
                 raise ConnectionError("SSH stream closed")
             buffer += self._decode(data)
+
+    async def _synchronise_terminal(self, timeout: float = 8) -> None:
+        """Complete RouterOS' terminal capability handshake before CLI input.
+
+        RouterOS asks for terminal identification and cursor position while a
+        PTY is starting. AsyncSSH transports the PTY bytes but intentionally does
+        not emulate a terminal, so without these replies the RouterOS prompt is
+        never opened and control keys (including Safe Mode) are ignored.
+        """
+
+        deadline = time.monotonic() + timeout
+        captured = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HighRiskError(
+                    "RouterOS SSH terminal negotiation timed out before the CLI prompt"
+                )
+            data = await self._read_stdout(remaining)
+            if not data:
+                raise ConnectionError("SSH stream closed during terminal negotiation")
+            captured += self._terminal_text(data)
+            if len(captured) > 32_768:
+                captured = captured[-32_768:]
+            # RouterOS emits colour using either ESC[... or the 8-bit CSI form;
+            # _terminal_text normalises both before this prompt check.
+            if "] >" in captured and ("admin@" in captured or "MikroTik" in captured):
+                return
+
+    async def _read_stdout(self, timeout: float) -> bytes:
+        data = await asyncio.wait_for(self._stdout.read(4096), timeout=timeout)
+        if not data:
+            return b""
+        payload = data if isinstance(data, bytes) else str(data).encode("utf-8")
+        await self._respond_to_terminal_queries(payload)
+        return payload
+
+    async def _respond_to_terminal_queries(self, data: bytes) -> None:
+        """Answer the small VT query subset RouterOS uses during PTY startup."""
+
+        buffer = self._terminal_parse_buffer + data
+        self._terminal_parse_buffer = b""
+        responses: list[bytes] = []
+        index = 0
+        while index < len(buffer):
+            byte = buffer[index]
+            if byte == 0x1B:
+                if index + 1 >= len(buffer):
+                    self._terminal_parse_buffer = buffer[index:]
+                    break
+                if buffer[index + 1] == ord("["):
+                    end = self._find_csi_end(buffer, index + 2)
+                    if end is None:
+                        self._terminal_parse_buffer = buffer[index:]
+                        break
+                    body = buffer[index + 2 : end]
+                    final = chr(buffer[end])
+                    response = self._handle_csi(body, final)
+                    if response is not None:
+                        responses.append(response)
+                    index = end + 1
+                    continue
+                if buffer[index + 1] == ord("Z"):
+                    # DECID: identify as a basic ANSI/VT terminal.
+                    responses.append(b"\x1b[?1;2c")
+                    index += 2
+                    continue
+                self._handle_escape(buffer[index + 1])
+                index += 2
+                continue
+            if byte == 0x9B:
+                end = self._find_csi_end(buffer, index + 1)
+                if end is None:
+                    self._terminal_parse_buffer = buffer[index:]
+                    break
+                body = buffer[index + 1 : end]
+                final = chr(buffer[end])
+                response = self._handle_csi(body, final)
+                if response is not None:
+                    responses.append(response)
+                index = end + 1
+                continue
+            self._advance_cursor_byte(byte)
+            index += 1
+        if responses:
+            await self._write(b"".join(responses))
+
+    @staticmethod
+    def _find_csi_end(data: bytes, start: int) -> int | None:
+        for index in range(start, len(data)):
+            if 0x40 <= data[index] <= 0x7E:
+                return index
+        return None
+
+    def _handle_csi(self, body: bytes, final: str) -> bytes | None:
+        text = body.decode("ascii", errors="ignore")
+        private = text.startswith("?")
+        if private:
+            text = text[1:]
+        params = self._csi_params(text)
+        if final == "n" and text == "6":
+            return f"\x1b[{self._cursor_row};{self._cursor_col}R".encode("ascii")
+        if private:
+            return None
+        if final in {"H", "f"}:
+            self._cursor_row = self._bounded(params[0], 1, self._term_rows)
+            self._cursor_col = self._bounded(
+                params[1] if len(params) > 1 else 1, 1, self._term_cols
+            )
+        elif final == "A":
+            self._cursor_row = max(1, self._cursor_row - (params[0] or 1))
+        elif final == "B":
+            self._cursor_row = min(self._term_rows, self._cursor_row + (params[0] or 1))
+        elif final == "C":
+            self._cursor_col = min(self._term_cols, self._cursor_col + (params[0] or 1))
+        elif final == "D":
+            self._cursor_col = max(1, self._cursor_col - (params[0] or 1))
+        elif final in {"G", "`"}:
+            self._cursor_col = self._bounded(params[0], 1, self._term_cols)
+        elif final == "d":
+            self._cursor_row = self._bounded(params[0], 1, self._term_rows)
+        elif final == "s":
+            self._saved_cursor = (self._cursor_row, self._cursor_col)
+        elif final == "u":
+            self._cursor_row, self._cursor_col = self._saved_cursor
+        elif final == "E":
+            self._cursor_row = min(self._term_rows, self._cursor_row + (params[0] or 1))
+            self._cursor_col = 1
+        elif final == "F":
+            self._cursor_row = max(1, self._cursor_row - (params[0] or 1))
+            self._cursor_col = 1
+        return None
+
+    @staticmethod
+    def _csi_params(text: str) -> list[int]:
+        if not text:
+            return [1]
+        values: list[int] = []
+        for item in text.split(";"):
+            try:
+                values.append(int(item) if item else 1)
+            except ValueError:
+                values.append(1)
+        return values
+
+    @staticmethod
+    def _bounded(value: int, minimum: int, maximum: int) -> int:
+        return max(minimum, min(maximum, value or minimum))
+
+    def _handle_escape(self, final: int) -> None:
+        if final == ord("D"):
+            self._cursor_row = min(self._term_rows, self._cursor_row + 1)
+        elif final == ord("M"):
+            self._cursor_row = max(1, self._cursor_row - 1)
+        elif final == ord("E"):
+            self._cursor_row = min(self._term_rows, self._cursor_row + 1)
+            self._cursor_col = 1
+        elif final == ord("7"):
+            self._saved_cursor = (self._cursor_row, self._cursor_col)
+        elif final == ord("8"):
+            self._cursor_row, self._cursor_col = self._saved_cursor
+        elif final == ord("c"):
+            self._cursor_row, self._cursor_col = 1, 1
+
+    def _advance_cursor_byte(self, byte: int) -> None:
+        if byte == 0x0D:
+            self._cursor_col = 1
+        elif byte == 0x0A:
+            self._cursor_row = min(self._term_rows, self._cursor_row + 1)
+        elif byte == 0x08:
+            self._cursor_col = max(1, self._cursor_col - 1)
+        elif byte == 0x09:
+            self._cursor_col = min(self._term_cols, ((self._cursor_col - 1) // 8 + 1) * 8 + 1)
+        elif byte >= 0x20:
+            self._cursor_col = min(self._term_cols, self._cursor_col + 1)
+
+    @staticmethod
+    def _terminal_text(data: bytes) -> str:
+        return data.replace(b"\x9b", b"\x1b[").decode("utf-8", errors="replace")
 
     async def _write(self, payload: bytes) -> None:
         self._stdin.write(payload)
@@ -292,6 +571,43 @@ class RouterOsSshSession:
             with suppress(asyncssh.Error, OSError):
                 await wait_closed()
 
+    def _mark_transport_lost(self, detail: str) -> None:
+        """Invalidate the session when the channel disappears unexpectedly.
+
+        Once the SSH transport is gone we cannot prove whether Safe Mode was
+        released or rolled back.  Reporting it as active would invite the
+        agent/operator to continue on a session that no longer exists, so the
+        state is deliberately fail-closed.
+        """
+
+        self._alive = False
+        self._safe_mode_active = False
+        self._last_transport_error = detail
+
+    def _transport_diagnostic(self, error: BaseException) -> str:
+        """Describe whether the whole connection or only the RouterOS PTY ended."""
+
+        details: list[str] = []
+        if self._transport_state.lost_detail:
+            details.append(self._transport_state.lost_detail)
+        fallback = f"{type(error).__name__}: {error}"
+        if fallback not in details:
+            details.append(fallback)
+
+        is_closed = getattr(self._connection, "is_closed", None)
+        if callable(is_closed):
+            details.append(f"connection_closed={bool(is_closed())}")
+        is_closing = getattr(self._process, "is_closing", None)
+        if callable(is_closing):
+            details.append(f"pty_closing={bool(is_closing())}")
+        returncode = getattr(self._process, "returncode", None)
+        if returncode is not None:
+            details.append(f"pty_returncode={returncode}")
+        exit_signal = getattr(self._process, "exit_signal", None)
+        if exit_signal:
+            details.append(f"pty_exit_signal={exit_signal}")
+        return "; ".join(details)
+
     def _result(
         self,
         raw: str,
@@ -301,6 +617,7 @@ class RouterOsSshSession:
         *,
         command: str | None = None,
         marker: str | None = None,
+        error_detail: str | None = None,
     ) -> SshExecResult:
         return SshExecResult(
             raw_output=raw,
@@ -311,14 +628,23 @@ class RouterOsSshSession:
             execution_time=round(time.monotonic() - started, 3),
             output_truncated=truncated,
             command_count=self._command_count,
+            error_detail=error_detail,
         )
 
     @classmethod
     def _clean_output(cls, raw: str, command: str | None, marker: str | None) -> str:
         lines: list[str] = []
-        for line in cls._ANSI.sub("", raw).replace("\r", "").splitlines():
+        normalized = raw.replace("\x9b", "\x1b[")
+        for line in cls._ANSI.sub("", normalized).replace("\r", "").splitlines():
+            line = cls._PROMPT.sub("", line)
             stripped = line.strip()
             if not stripped or stripped in (command, marker):
+                continue
+            if (
+                command
+                and stripped.startswith(command)
+                and stripped[len(command) :].strip() == command
+            ):
                 continue
             if marker is not None and marker in stripped and ":put" in stripped:
                 continue
@@ -335,7 +661,9 @@ class RouterOsSshSession:
 
     @staticmethod
     def _decode(data: Any) -> str:
-        return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+        if isinstance(data, bytes):
+            return data.replace(b"\x9b", b"\x1b[").decode("utf-8", errors="replace")
+        return str(data)
 
     def _require_alive(self) -> None:
         if not self._alive:
