@@ -552,12 +552,14 @@ class DiscoveryApp(App[None]):
             board=device.board if device and device.board else "RouterOS",
             mac=device.mac if device and device.mac else "—",
             tool_count=result.tool_count,
+            port=pending.port,
         )
         self.push_screen(
             ChatScreen(
                 profile,
                 result,
                 settings_store=self._settings,
+                reachability_check=True,
                 language=self.language,
             )
         )

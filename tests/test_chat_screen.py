@@ -181,6 +181,46 @@ def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_router_disconnect_is_reported_and_subsequent_prompt_fails_fast(tmp_path) -> None:
+    async def scenario() -> None:
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        runner = _Runner()
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: runner,
+            reachability_check=True,
+        )
+
+        def fail_probe() -> None:
+            raise OSError("router is offline")
+
+        screen._tcp_probe = fail_probe
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            prompt = screen.query_one("#chat-input", Input)
+            prompt.value = "Проверь состояние роутера"
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert runner.calls == []
+            status = str(screen.query_one("#connection-status", Static).content)
+            assert "CONNECTION LOST" in status
+            assert "/exit" in status
+
+            prompt.value = "Ещё один запрос"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert runner.calls == []
+
+    asyncio.run(scenario())
+
+
 def test_tab_enters_high_risk_only_after_preflight_and_exits_by_explicit_commit(tmp_path) -> None:
     async def scenario() -> None:
         class Session:

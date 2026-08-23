@@ -29,6 +29,79 @@ _SETTLED_ACTIONS = frozenset(
     }
 )
 
+# RouterOS assigns a fresh internal ``.id`` when a record is recreated and
+# includes several live counters/status fields in list snapshots. Those values
+# are useful for diagnostics, but they are not configuration identity. Keeping
+# them in a rollback fingerprint makes a successful restore look like a failure.
+_VOLATILE_STATE_KEYS = frozenset(
+    {
+        ".id",
+        ".about",
+        ".nextid",
+        "about",
+        "running",
+        "status",
+        "uptime",
+        "bytes",
+        "packets",
+        "dynamic",
+        "invalid",
+        "dead",
+        "expired",
+        "active",
+        "creation-time",
+        "last-logged-in",
+        "last-link-up-time",
+        "last-link-down-time",
+        "link-downs",
+        "last-link-down",
+        "last-link-up",
+        "rx-byte",
+        "tx-byte",
+        "rx-packet",
+        "tx-packet",
+    }
+)
+
+
+def _canonical_state(value: Any) -> Any:
+    """Return a stable, configuration-oriented RouterOS snapshot."""
+
+    if isinstance(value, Mapping):
+        dynamic = value.get("dynamic")
+        if dynamic is True or (
+            isinstance(dynamic, str) and dynamic.casefold() in {"true", "yes"}
+        ):
+            return None
+        return {
+            str(key): _canonical_state(item)
+            for key, item in value.items()
+            if str(key).casefold() not in _VOLATILE_STATE_KEYS
+        }
+    if isinstance(value, list):
+        # Preserve list order: it is meaningful for firewall and routing rules.
+        return [
+            normalized
+            for item in value
+            if (normalized := _canonical_state(item)) is not None
+        ]
+    if isinstance(value, tuple):
+        return [_canonical_state(item) for item in value]
+    return value
+
+
+def _state_fingerprint(value: Any) -> str:
+    canonical = _canonical_state(value)
+    return hashlib.sha256(
+        json.dumps(
+            canonical,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
 # Scenario runbooks still provide richer forms and specialised verification.  The generic
 # proposal path intentionally follows the live catalog, however: READY must not hide a
 # RouterOS configuration capability merely because a bespoke runbook has not been written.
@@ -234,15 +307,7 @@ class TypedChangeDefinition(RunbookDefinition):
                 str(dry_run.get("error")) if dry_run.get("error") is not None else None,
             )
         current_state = first.get("currentState")
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                current_state,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
+        fingerprint = _state_fingerprint(current_state)
         return action, fingerprint
 
     async def capture_baseline(

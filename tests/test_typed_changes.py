@@ -134,6 +134,71 @@ def test_typed_change_uses_dry_run_for_baseline_apply_check_and_rollback_check()
     asyncio.run(scenario())
 
 
+def test_typed_rollback_ignores_routeros_runtime_identity_fields() -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.states = [
+                {
+                    "items": [
+                        {
+                            ".id": "*1",
+                            "name": "pppoe-wan",
+                            "interface": "ether1",
+                            "running": False,
+                            "status": "disconnected",
+                        }
+                    ]
+                },
+                {
+                    "items": [
+                        {
+                            ".id": "*9",
+                            "name": "pppoe-wan",
+                            "interface": "ether1",
+                            "running": True,
+                            "status": "connected",
+                        }
+                    ]
+                },
+            ]
+
+        async def call_tool(self, name, arguments=None):
+            assert name == "plan_changes"
+            current_state = self.states.pop(0)
+            return McpToolResult(
+                ("planned",),
+                {
+                    "steps": [
+                        {
+                            "currentState": current_state,
+                            "structuredDryRun": {"action": "no_change"},
+                        }
+                    ]
+                },
+                False,
+            )
+
+    async def scenario() -> None:
+        definition = TypedChangeDefinition(_route_tool())
+        submission = definition.submission(
+            {
+                "action": "remove",
+                "dstAddress": "10.0.0.0/24",
+                "gateway": "192.0.2.1",
+            }
+        )
+        session = Session()
+        baseline = await definition.capture_baseline(
+            session, "mikrotik-1", submission.values
+        )
+        result = await definition.verify_rollback(
+            session, "mikrotik-1", submission.values, baseline
+        )
+        assert result.passed is True
+
+    asyncio.run(scenario())
+
+
 def test_typed_remove_treats_not_found_post_check_as_verified_absence() -> None:
     class Session:
         async def call_tool(self, name, arguments=None):

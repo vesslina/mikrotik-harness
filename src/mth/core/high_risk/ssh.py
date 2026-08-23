@@ -72,14 +72,31 @@ class RouterOsSshSession:
 
         async with self._lock:
             self._require_alive()
-            marker = self._marker()
-            await self._write(b"\x18\r\n" + self._marker_command(marker))
             try:
-                raw, _ = await self._read_until_marker(marker, timeout, 32_768)
+                # Ctrl+X is a terminal control key, not a RouterOS command.  It
+                # must reach the PTY as a standalone byte and be allowed to
+                # produce the Safe Mode prompt before we send any framing
+                # command.  Sending CR/LF and :put in the same write can make
+                # RouterOS treat the marker as part of the pre-Safe command,
+                # leaving us with no trustworthy <SAFE> evidence.
+                await self._write(b"\x18")
+                raw = await self._read_until_texts(
+                    ("[safe mode taken]", "<safe>"), timeout, 32_768
+                )
+                if "safe mode" in raw.casefold() and (
+                    "another user" in raw.casefold()
+                    or "hijack" in raw.casefold()
+                ):
+                    raise HighRiskError(
+                        "RouterOS Safe Mode is owned by another session; refusing to hijack it"
+                    )
+                marker = self._marker()
+                await self._write(self._marker_command(marker))
+                await self._read_until_marker(marker, timeout, 32_768)
             except (ConnectionError, TimeoutError):
                 self._alive = False
                 return False
-            self._safe_mode_active = "<SAFE>" in raw
+            self._safe_mode_active = "<safe>" in raw.casefold()
             return self._safe_mode_active
 
     async def execute(
@@ -117,11 +134,13 @@ class RouterOsSshSession:
                 return False
             marker = self._marker()
             try:
-                await self._write(b"\x18\r\n" + self._marker_command(marker))
-                raw, _ = await self._read_until_marker(marker, 8, 32_768)
+                await self._write(b"\x18")
+                raw = await self._read_until_text("safe mode released", 8, 32_768)
+                await self._write(self._marker_command(marker))
+                await self._read_until_marker(marker, 8, 32_768)
             except (ConnectionError, TimeoutError):
                 return False
-            released = "safe mode released" in raw.casefold() and "<SAFE>" not in raw
+            released = "safe mode released" in raw.casefold() and "<safe>" not in raw.casefold()
             if released:
                 self._safe_mode_active = False
                 await self._close_transport()
@@ -189,8 +208,24 @@ class RouterOsSshSession:
         timeout: float,
         max_output_bytes: int,
     ) -> str:
+        return await self._read_until_texts((needle,), timeout, max_output_bytes)
+
+    async def _read_until_texts(
+        self,
+        needles: tuple[str, ...],
+        timeout: float,
+        max_output_bytes: int,
+    ) -> str:
+        """Read until every case-insensitive text marker is visible.
+
+        RouterOS appends ``<SAFE>`` to the prompt rather than emitting it as a
+        standalone line, so line-based framing cannot be used for the Safe
+        Mode handshake.
+        """
+
         deadline = time.monotonic() + timeout
-        captured = ""
+        captured = self._pending
+        self._pending = ""
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -202,7 +237,8 @@ class RouterOsSshSession:
             captured += text
             if len(captured.encode("utf-8")) > max_output_bytes:
                 captured = captured[-max_output_bytes:]
-            if needle.casefold() in captured.casefold():
+            lowered = captured.casefold()
+            if all(needle.casefold() in lowered for needle in needles):
                 return captured
 
     async def _read_until_marker(

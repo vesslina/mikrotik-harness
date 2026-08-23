@@ -25,13 +25,15 @@ class _Writer:
     def write(self, payload: bytes) -> None:
         self.writes.append(payload)
         text = payload.decode("utf-8", errors="replace")
+        if b"\x18" in payload and b":put " not in payload:
+            self.reader.put(b"[Safe Mode taken]\r\n<SAFE> [admin@MikroTik] >\r\n")
+            return
         marker = next(
             (line.split('"')[1] for line in text.splitlines() if line.startswith(":put ")),
             None,
         )
         if marker is not None:
-            prefix = "<SAFE> [admin@MikroTik] >\r\n" if b"\x18" in payload else ""
-            self.reader.put((prefix + "ether1\r\n" + marker + "\r\n").encode())
+            self.reader.put(("ether1\r\n" + marker + "\r\n").encode())
 
     async def drain(self) -> None:
         return None
@@ -68,7 +70,8 @@ def test_persistent_pty_frames_output_verifies_safe_mode_and_aborts() -> None:
         assert result.cleaned_output == "ether1"
         assert result.safe_mode_active is True
         assert result.command_count == 1
-        assert all(b"__MTH_CMD_DONE_" in write for write in writer.writes[:2])
+        assert b"\x18" in writer.writes[0]
+        assert b"__MTH_CMD_DONE_" in writer.writes[1]
 
         await session.abort_and_close()
         assert connection.closed is True

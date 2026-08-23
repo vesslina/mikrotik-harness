@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import socket
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -95,6 +97,7 @@ class ChatProfile:
     board: str
     mac: str
     tool_count: int
+    port: int = 443
 
 
 class AgentRunner(Protocol):
@@ -785,7 +788,9 @@ class ChatScreen(Screen[None]):
         border-bottom: solid #5b6268;
     }
     #brand { width: 48; min-width: 48; height: 14; background: #090909; }
-    #device-info { width: 1fr; height: 14; padding-left: 2; color: #9aa2aa; }
+    #device-panel { width: 1fr; height: 14; }
+    #device-info { width: 1fr; height: 12; padding-left: 2; color: #9aa2aa; }
+    #connection-status { width: 1fr; height: 2; padding-left: 2; }
     #transcript { height: 1fr; padding: 1 3; background: #090909; scrollbar-color: #5b6268; }
     #activity-line {
         display: none;
@@ -863,6 +868,7 @@ class ChatScreen(Screen[None]):
         settings_store: UiSettingsStore | None = None,
         session_store: ChatSessionStore | None = None,
         high_risk_service: HighRiskService | None = None,
+        reachability_check: bool = False,
         language: Language | None = None,
     ) -> None:
         super().__init__()
@@ -876,6 +882,10 @@ class ChatScreen(Screen[None]):
         self._settings = settings_store or UiSettingsStore()
         self._sessions = session_store or ChatSessionStore()
         self._high_risk_service = high_risk_service or HighRiskService()
+        # The application enables this network preflight. Keeping it opt-in at
+        # the widget boundary also lets deterministic UI tests use a fake agent
+        # without requiring a live RouterOS endpoint.
+        self._reachability_check = reachability_check
         self._language = language or self._settings.language()
         self._preset: ProviderPreset | None = None
         self._agent: AgentRunner | None = None
@@ -905,11 +915,17 @@ class ChatScreen(Screen[None]):
         self._session_picker_sessions: tuple[ChatSession, ...] = ()
         self._transcript_group: str | None = None
         self._high_risk_session: HighRiskSession | None = None
+        self._router_offline = False
+        self._connection_lost_at: datetime | None = None
+        self._connection_error: str | None = None
+        self._connection_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-header"):
             yield PixelLogo(id="brand")
-            yield Static("", id="device-info", markup=False)
+            with Vertical(id="device-panel"):
+                yield Static("", id="device-info", markup=False)
+                yield Static("", id="connection-status", markup=False)
         yield TranscriptLog(id="transcript", wrap=True, markup=False, auto_scroll=True)
         yield Static("", id="activity-line", markup=False)
         with VerticalScroll(id="interaction-panel"):
@@ -2436,6 +2452,14 @@ class ChatScreen(Screen[None]):
             ),
             group="user",
         )
+        if self._router_offline:
+            self._write_system(
+                "Связь с MikroTik потеряна. Выполните /exit и подключитесь заново."
+                if self._language is Language.RU
+                else "The RouterOS connection is offline. Use /exit and reconnect.",
+                error=True,
+            )
+            return
         if self._agent is None:
             self._write_system("Select a model first with /model.", error=True)
             return
@@ -2447,11 +2471,19 @@ class ChatScreen(Screen[None]):
     async def _run_agent(self, prompt: str) -> None:
         assert self._agent is not None
         try:
+            if self._reachability_check and not await self._probe_router():
+                self._mark_connection_lost("TCP endpoint is unreachable")
+                return
             events = await self._agent.run(prompt, self._mode)
         except ProviderError as error:
             self._write_system(f"{error.code}: {error}", error=True)
+        except (ConnectionError, OSError, TimeoutError) as error:
+            self._mark_connection_lost(str(error) or "backend request timed out")
         except Exception as error:
-            self._write_system(f"Agent loop failed: {error}", error=True)
+            if self._looks_like_connection_failure(error):
+                self._mark_connection_lost(str(error) or "backend request failed")
+            else:
+                self._write_system(f"Agent loop failed: {error}", error=True)
         else:
             self._stop_activity()
             proposal = next(
@@ -2491,6 +2523,59 @@ class ChatScreen(Screen[None]):
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_mode()
+
+    async def _probe_router(self) -> bool:
+        """Fail fast when the registered MikroMCP REST endpoint is unreachable."""
+
+        try:
+            await asyncio.to_thread(self._tcp_probe)
+        except OSError:
+            return False
+        return True
+
+    def _tcp_probe(self) -> None:
+        with socket.create_connection(
+            (self.profile.address, self.profile.port), timeout=1.5
+        ):
+            return
+
+    @staticmethod
+    def _looks_like_connection_failure(error: Exception) -> bool:
+        detail = str(error).casefold()
+        return any(
+            marker in detail
+            for marker in (
+                "timed out",
+                "timeout",
+                "connection",
+                "clientrequest",
+                "broken pipe",
+                "network is unreachable",
+            )
+        )
+
+    def _mark_connection_lost(self, reason: str) -> None:
+        if not self._router_offline:
+            self._router_offline = True
+            self._connection_lost_at = datetime.now()
+            self._connection_error = reason
+            if self._connection_timer is None:
+                self._connection_timer = self.set_interval(
+                    1.0, self._refresh_connection_status
+                )
+            self._write_system(
+                (
+                    "Связь с MikroTik потеряна"
+                    f" ({reason}). Выполните /exit и подключитесь заново."
+                )
+                if self._language is Language.RU
+                else (
+                    "Connection to MikroTik was lost"
+                    f" ({reason}). Use /exit and reconnect."
+                ),
+                error=True,
+            )
+        self._refresh_header()
 
     def _start_activity(self) -> None:
         self._activity_started = time.monotonic()
@@ -2675,6 +2760,35 @@ class ChatScreen(Screen[None]):
             f"{labels[5]:<10}{self.profile.version}  ·  {self.profile.board}\n"
             f"{labels[6]:<10}{self.profile.router_id}\n"
             f"{labels[7]:<10}{self.profile.tool_count} live"
+        )
+        self._refresh_connection_status()
+
+    def _refresh_connection_status(self) -> None:
+        status = self.query_one("#connection-status", Static)
+        if not self._router_offline or self._connection_lost_at is None:
+            status.update(
+                Text(
+                    "Connection  ✓ MikroMCP online"
+                    if self._language is not Language.RU
+                    else "Соединение  ✓ MikroMCP онлайн",
+                    style="#7fd88f",
+                )
+            )
+            return
+        elapsed = max(0, int((datetime.now() - self._connection_lost_at).total_seconds()))
+        status.update(
+            Text(
+                (
+                    f"CONNECTION LOST · {self.profile.identity} · {self.profile.router_id}"
+                    f" · {elapsed}s · /exit + reconnect"
+                )
+                if self._language is not Language.RU
+                else (
+                    f"СВЯЗЬ ПОТЕРЯНА · {self.profile.identity} · {self.profile.router_id}"
+                    f" · {elapsed}с · /exit + подключиться заново"
+                ),
+                style="#ff5c57",
+            )
         )
 
     def _refresh_mode(self) -> None:
