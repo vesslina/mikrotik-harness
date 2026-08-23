@@ -44,6 +44,7 @@ from mth.agent import (
     ProviderWarmup,
     ReadOnlyAgentLoop,
     ReasoningControl,
+    ReasoningDelta,
     ReasoningStatus,
     RunbookProposal,
     ToolCall,
@@ -141,6 +142,8 @@ class ModelSelection:
 
 LOCAL_CONTEXT_TOKENS = 60_000
 REMOTE_CONTEXT_TOKENS = 200_000
+SAFE_MODE_ACTION_WARNING = 80
+SAFE_MODE_ACTION_CRITICAL = 90
 
 
 def _context_default(provider: ProviderKind) -> int:
@@ -438,7 +441,7 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                 ).value,
                 capabilities=ModelCapabilities(
                     supports_tools=True,
-                    supports_streaming=False,
+                    supports_streaming=True,
                     supports_reasoning=False,
                     supports_json_schema=False,
                     max_context_tokens=context_tokens,
@@ -776,7 +779,7 @@ class ChatScreen(Screen[None]):
     BINDINGS = [
         Binding("tab", "cycle_mode", "Cycle mode", show=False, priority=True),
         Binding("escape", "cancel_interaction", "Cancel", show=False, priority=True),
-        Binding("ctrl+o", "tool_details", "Tool details", show=False),
+        Binding("ctrl+o", "tool_details", "Show thinking", show=False),
         Binding("ctrl+l", "clear_chat", "Clear", show=False),
     ]
 
@@ -793,6 +796,14 @@ class ChatScreen(Screen[None]):
     #device-info { width: 1fr; height: 12; padding-left: 2; color: #9aa2aa; }
     #connection-status { width: 1fr; height: 2; padding-left: 2; }
     #transcript { height: 1fr; padding: 1 3; background: #090909; scrollbar-color: #5b6268; }
+    #thinking-block {
+        display: none;
+        height: auto;
+        max-height: 8;
+        padding: 0 3;
+        color: #8b949e;
+        background: #090909;
+    }
     #activity-line {
         display: none;
         height: 2;
@@ -915,6 +926,9 @@ class ChatScreen(Screen[None]):
         self._session: ChatSession | None = None
         self._session_picker_sessions: tuple[ChatSession, ...] = ()
         self._transcript_group: str | None = None
+        self._thinking_text = ""
+        self._thinking_collapsed = False
+        self._skip_reasoning_status = False
         self._high_risk_session: HighRiskSession | None = None
         self._router_offline = False
         self._connection_lost_at: datetime | None = None
@@ -928,6 +942,7 @@ class ChatScreen(Screen[None]):
                 yield Static("", id="device-info", markup=False)
                 yield Static("", id="connection-status", markup=False)
         yield TranscriptLog(id="transcript", wrap=True, markup=False, auto_scroll=True)
+        yield Static("", id="thinking-block", markup=False)
         yield Static("", id="activity-line", markup=False)
         with VerticalScroll(id="interaction-panel"):
             with Vertical(id="inline-model-view", classes="interaction-view"):
@@ -1150,6 +1165,8 @@ class ChatScreen(Screen[None]):
         self._reset_chat("Чат очищен." if self._language is Language.RU else "Chat cleared.")
 
     def action_new_chat(self) -> None:
+        if self._high_risk_edit_blocked("start a new chat"):
+            return
         self._reset_chat(
             "Новый чат создан."
             if self._language is Language.RU
@@ -1159,6 +1176,10 @@ class ChatScreen(Screen[None]):
     def _reset_chat(self, message: str) -> None:
         self.query_one("#transcript", RichLog).clear()
         self._transcript_group = None
+        self._thinking_text = ""
+        self._thinking_collapsed = False
+        self._skip_reasoning_status = False
+        self._refresh_thinking_block()
         self._session = None
         clear_history = getattr(self._agent, "clear_history", None)
         if callable(clear_history):
@@ -1181,6 +1202,10 @@ class ChatScreen(Screen[None]):
         )
 
     def action_tool_details(self) -> None:
+        if self._thinking_text:
+            self._thinking_collapsed = not self._thinking_collapsed
+            self._refresh_thinking_block()
+            return
         if not self._tool_trace:
             self._write_system(
                 "В текущем ходе ещё нет вызовов инструментов."
@@ -1215,6 +1240,8 @@ class ChatScreen(Screen[None]):
         input_widget.focus()
 
     def _show_model_form(self) -> None:
+        if self._high_risk_edit_blocked("change the model"):
+            return
         self.query_one("#inline-model-error", Static).update("")
         self._show_inline("model", "#inline-model-view", "#inline-provider-kind")
 
@@ -1237,7 +1264,7 @@ class ChatScreen(Screen[None]):
                 ).value,
                 capabilities=ModelCapabilities(
                     supports_tools=True,
-                    supports_streaming=False,
+                    supports_streaming=True,
                     supports_reasoning=False,
                     supports_json_schema=False,
                     max_context_tokens=context_tokens,
@@ -1294,6 +1321,8 @@ class ChatScreen(Screen[None]):
         self._activate_preset(preset, api_key)
 
     def _delete_inline_model(self) -> None:
+        if self._high_risk_edit_blocked("delete a model"):
+            return
         preset = self._selected_inline_model()
         if preset is None:
             return
@@ -1438,6 +1467,14 @@ class ChatScreen(Screen[None]):
             self._write_system(str(error), error=True)
         except HighRiskError as error:
             self._write_system(f"HIGH RISK pre-flight failed: {error}", error=True)
+        except asyncio.CancelledError:
+            self._write_system(
+                "HIGH RISK pre-flight was cancelled; no elevated session was unlocked."
+                if self._language is Language.EN
+                else "Pre-flight HIGH RISK отменён; повышенная сессия не разблокирована.",
+                error=True,
+            )
+            raise
         except Exception as error:
             self._write_system(f"HIGH RISK pre-flight failed: {error}", error=True)
         else:
@@ -1569,6 +1606,14 @@ class ChatScreen(Screen[None]):
             self._write_system(message)
         except HighRiskError as error:
             self._write_system(f"Could not close HIGH RISK session: {error}", error=True)
+        except asyncio.CancelledError:
+            self._write_system(
+                "HIGH RISK exit was cancelled; the SSH session remains open."
+                if self._language is Language.EN
+                else "Выход из HIGH RISK отменён; SSH-сессия остаётся открытой.",
+                error=True,
+            )
+            raise
         finally:
             self.query_one("#chat-input", Input).disabled = False
             self.query_one("#chat-input", Input).focus()
@@ -1762,10 +1807,12 @@ class ChatScreen(Screen[None]):
                 "/log  /copy  /clear  /exit\n"
                 + (
                     "Tab переключает PLAN, READY и HIGH RISK. В HIGH RISK доступны прямой "
-                    "CLI и все инструменты без подтверждения каждой команды."
+                    "CLI и все инструменты без подтверждения каждой команды. Ctrl+O показывает "
+                    "или скрывает поток размышлений."
                     if self._language is Language.RU
                     else "Tab cycles PLAN, READY and HIGH RISK. HIGH RISK exposes direct CLI "
-                    "and all tools without per-command approval."
+                    "and all tools without per-command approval. Ctrl+O toggles streamed "
+                    "thinking."
                 )
             )
         elif command == "/info":
@@ -1862,6 +1909,8 @@ class ChatScreen(Screen[None]):
         )
 
     def _show_models(self, requested: str) -> None:
+        if self._high_risk_edit_blocked("change the model"):
+            return
         try:
             presets = self._preset_store.list()
         except (OSError, ValueError) as error:
@@ -2002,6 +2051,9 @@ class ChatScreen(Screen[None]):
         self._activate_preset(preset, api_key)
 
     def _model_delete_approved(self, approved: bool | None) -> None:
+        if self._high_risk_edit_blocked("delete a model"):
+            self._pending_model_delete = None
+            return
         preset = self._pending_model_delete
         self._pending_model_delete = None
         if preset is None or not approved:
@@ -2027,6 +2079,8 @@ class ChatScreen(Screen[None]):
         *,
         persist: bool = True,
     ) -> None:
+        if self._high_risk_edit_blocked("change the model"):
+            return
         try:
             agent = self._agent_factory(preset, api_key)
             if persist:
@@ -2445,6 +2499,10 @@ class ChatScreen(Screen[None]):
 
     def _submit_prompt(self, prompt: str) -> None:
         self._tool_trace.clear()
+        self._thinking_text = ""
+        self._thinking_collapsed = False
+        self._skip_reasoning_status = False
+        self._refresh_thinking_block()
         self._write_transcript(
             Padding(
                 Text(f"❯ {prompt}", style="bold white"),
@@ -2478,6 +2536,16 @@ class ChatScreen(Screen[None]):
             events = await self._agent.run(prompt, self._mode)
         except ProviderError as error:
             self._write_system(f"{error.code}: {error}", error=True)
+        except asyncio.CancelledError:
+            self._write_system(
+                (
+                    "Agent request cancelled."
+                    if self._language is Language.EN
+                    else "Запрос агента отменён."
+                ),
+                error=True,
+            )
+            raise
         except (ConnectionError, OSError, TimeoutError) as error:
             self._mark_connection_lost(str(error) or "backend request timed out")
         except Exception as error:
@@ -2711,8 +2779,18 @@ class ChatScreen(Screen[None]):
 
     def _render_event(self, event: AgentEvent) -> None:
         if isinstance(event, AgentMessage):
+            self._flush_thinking_block()
             self._write_transcript(markdown_to_text(f"● {event.text}"), group="assistant")
+        elif isinstance(event, ReasoningDelta):
+            self._thinking_text = (self._thinking_text + event.text)[-12_000:]
+            self._refresh_thinking_block()
         elif isinstance(event, ReasoningStatus):
+            if self._thinking_text:
+                self._skip_reasoning_status = True
+                return
+            if self._skip_reasoning_status:
+                self._skip_reasoning_status = False
+                return
             detail = (
                 f"{event.token_count} {tr(self._language, 'reasoning.tokens')}"
                 if event.token_count is not None
@@ -2732,17 +2810,22 @@ class ChatScreen(Screen[None]):
                 group="assistant",
             )
         elif isinstance(event, PlannedAction):
+            self._flush_thinking_block()
             self._write_transcript(Text(f"  {event.summary}", style="#b6b6b6"), group="tool")
         elif isinstance(event, ToolCall):
+            self._flush_thinking_block()
             self._tool_trace.append(
                 f"{event.tool_name} "
                 + json.dumps(event.arguments, ensure_ascii=False, sort_keys=True)
             )
             self._write_transcript(Text(f"  └ {event.tool_name}", style="#8b949e"), group="tool")
         elif isinstance(event, ToolResult):
+            self._flush_thinking_block()
             status = "error" if event.is_error else "done"
             style = "#ff6b62" if event.is_error else "#7fd88f"
             self._write_transcript(Text(f"    ↳ {status}", style=style), group="tool")
+            if self._mode is AgentMode.HIGH_RISK:
+                self._refresh_mode()
         elif isinstance(event, RunbookProposal):
             try:
                 title = self._definition_for_id(event.runbook).title
@@ -2763,6 +2846,34 @@ class ChatScreen(Screen[None]):
             )
         elif isinstance(event, FinalSummary) and event.outcome is not FinalOutcome.COMPLETED:
             self._write_transcript(Text(event.text, style="#ffb454"), group="assistant")
+
+    def _refresh_thinking_block(self) -> None:
+        block = self.query_one("#thinking-block", Static)
+        block.display = bool(self._thinking_text) and not self._thinking_collapsed
+        if block.display:
+            label = (
+                "┌ thinking (Ctrl+O to hide)\n"
+                if self._language is Language.EN
+                else "┌ размышление (Ctrl+O — скрыть)\n"
+            )
+            block.update(Text(label + self._thinking_text, style="#8b949e"))
+
+    def _flush_thinking_block(self) -> None:
+        """Materialise streamed reasoning before the next permanent transcript item."""
+
+        if not self._thinking_text:
+            return
+        self._skip_reasoning_status = True
+        if not self._thinking_collapsed:
+            label = (
+                "┌ thinking\n" if self._language is Language.EN else "┌ размышление\n"
+            )
+            self._write_transcript(
+                Text(label + self._thinking_text, style="#8b949e"), group="assistant"
+            )
+        self._thinking_text = ""
+        self._thinking_collapsed = False
+        self._refresh_thinking_block()
 
     def _refresh_header(self) -> None:
         model = self._preset.model if self._preset else (
@@ -2843,9 +2954,37 @@ class ChatScreen(Screen[None]):
             action_count = session.ssh.command_count if session is not None else 0
             label = f"{tr(self._language, 'chat.high_risk')} · SAFE · {action_count}/100 actions"
         mode_line.set_class(self._mode is AgentMode.HIGH_RISK, "high-risk")
-        mode_line.update(
-            f"▮▮ {label}  ({tr(self._language, 'chat.tab_cycle')})"
+        warning = ""
+        if self._mode is AgentMode.HIGH_RISK and action_count >= SAFE_MODE_ACTION_CRITICAL:
+            warning = (
+                " · ⚠ SAFE MODE limit is near"
+                if self._language is Language.EN
+                else " · ⚠ лимит SAFE MODE близко"
+            )
+        elif self._mode is AgentMode.HIGH_RISK and action_count >= SAFE_MODE_ACTION_WARNING:
+            warning = (
+                " · ⚠ take a Safe Mode checkpoint soon"
+                if self._language is Language.EN
+                else " · ⚠ скоро нужен checkpoint SAFE MODE"
+            )
+        mode_line.update(f"▮▮ {label}{warning}  ({tr(self._language, 'chat.tab_cycle')})")
+
+    def _high_risk_edit_blocked(self, action: str) -> bool:
+        """Keep the live SSH safety context stable while HIGH RISK is active."""
+
+        if self._mode is not AgentMode.HIGH_RISK or self._high_risk_session is None:
+            return False
+        self._write_system(
+            (
+                f"Cannot {action} while HIGH RISK SSH is active. Exit HIGH RISK first; "
+                "the current Safe Mode session remains open."
+                if self._language is Language.EN
+                else f"Нельзя {action} при активной SSH-сессии HIGH RISK. Сначала выйдите "
+                "из HIGH RISK; текущая сессия Safe Mode останется открытой."
+            ),
+            error=True,
         )
+        return True
 
     def _matching_commands(self, value: str) -> tuple[tuple[str, str], ...]:
         candidate = value.strip().lower()

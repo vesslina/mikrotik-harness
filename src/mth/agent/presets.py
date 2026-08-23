@@ -150,9 +150,10 @@ class ProviderPresetStore:
             raise ValueError(
                 f"Preset {name!r} has an invalid sensitive-tool-data policy"
             )
+        provider = ProviderKind(str(raw["provider"]))
         return ProviderPreset(
             name=name,
-            provider=ProviderKind(str(raw["provider"])),
+            provider=provider,
             base_url=str(raw["base_url"]),
             model=str(raw["model"]),
             api_key_env=(
@@ -161,7 +162,15 @@ class ProviderPresetStore:
             allow_sensitive_tool_data=allow_sensitive,
             capabilities=ModelCapabilities(
                 supports_tools=bool(capabilities["supports_tools"]),
-                supports_streaming=bool(capabilities["supports_streaming"]),
+                # Older presets predate the SSE transport.  All supported
+                # providers use the OpenAI-compatible endpoint, so upgrade
+                # the stale capability in memory instead of forcing a recreate.
+                supports_streaming=bool(capabilities["supports_streaming"]) or provider
+                in {
+                    ProviderKind.LM_STUDIO,
+                    ProviderKind.OPENROUTER,
+                    ProviderKind.OPENAI_COMPATIBLE,
+                },
                 supports_reasoning=bool(capabilities["supports_reasoning"]),
                 supports_json_schema=bool(capabilities["supports_json_schema"]),
                 max_context_tokens=int(capabilities["max_context_tokens"]),

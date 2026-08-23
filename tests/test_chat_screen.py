@@ -16,6 +16,7 @@ from mth.agent import (
     ProviderPreset,
     ProviderPresetStore,
     ReasoningControl,
+    ReasoningDelta,
     RunbookProposal,
     ToolCallFormat,
     ToolResult,
@@ -183,6 +184,36 @@ def test_chat_header_mode_cycle_and_prompt(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_streamed_thinking_is_inserted_before_answer_and_can_be_hidden(tmp_path) -> None:
+    async def scenario() -> None:
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: _Runner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen._render_event(ReasoningDelta("внутренний план"))
+            await pilot.press("ctrl+o")
+            assert screen.query_one("#thinking-block", Static).display is False
+            screen._render_event(AgentMessage("готовый ответ"))
+            transcript = screen.query_one("#transcript").plain_text()
+            assert "внутренний план" not in transcript
+            assert transcript.index("готовый ответ") >= 0
+
+            screen._render_event(ReasoningDelta("ещё один план"))
+            screen._render_event(AgentMessage("ответ после thinking"))
+            transcript = screen.query_one("#transcript").plain_text()
+            assert transcript.index("ещё один план") < transcript.index("ответ после thinking")
+
+    asyncio.run(scenario())
+
+
 def test_router_disconnect_is_reported_and_subsequent_prompt_fails_fast(tmp_path) -> None:
     async def scenario() -> None:
         store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
@@ -277,6 +308,19 @@ def test_tab_enters_high_risk_only_after_preflight_and_exits_by_explicit_commit(
             assert runner.executors == [service.session]
             assert "HIGH RISK" in str(screen.query_one("#mode-line", Static).content)
             assert screen.query_one("#mode-line", Static).has_class("high-risk")
+
+            service.session.ssh.command_count = 85
+            screen._refresh_mode()
+            assert "checkpoint" in str(screen.query_one("#mode-line", Static).content)
+
+            prompt = screen.query_one("#chat-input", Input)
+            for command in ("/model", "/models", "/new"):
+                prompt.value = command
+                await pilot.press("enter")
+                await pilot.pause()
+                assert screen.query_one("#interaction-panel").display is False
+                assert "HIGH RISK" in str(screen.query_one("#mode-line", Static).content)
+            assert "Cannot" in screen.query_one("#transcript").plain_text()
 
             await pilot.press("tab")
             await pilot.pause()

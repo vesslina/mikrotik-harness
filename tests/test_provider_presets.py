@@ -109,3 +109,4 @@ def test_old_preset_defaults_sensitive_tool_data_to_protected(tmp_path) -> None:
 
     assert selected is not None
     assert selected.allow_sensitive_tool_data is False
+    assert selected.capabilities.supports_streaming is True

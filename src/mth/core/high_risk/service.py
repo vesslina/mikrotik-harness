@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import secrets
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -157,9 +159,11 @@ class HighRiskService:
                 f"SSH host key mismatch for {target.host}:{target.port}; entry was blocked"
             )
 
-        artifacts = await self._create_remote_artifacts(router_id)
+        artifacts: HighRiskArtifacts | None = None
         session: RouterOsSshSession | None = None
         try:
+            artifacts = self._new_artifacts(router_id)
+            await self._create_remote_artifacts(artifacts)
             known_hosts = self._write_known_hosts(target, public_key)
             session = await self._connection_factory(target, known_hosts)
             artifacts.backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,12 +177,22 @@ class HighRiskService:
                     "RouterOS Safe Mode was not confirmed; HIGH RISK was not unlocked"
                 )
             return HighRiskSession(session, artifacts, self._secrets)
+        except asyncio.CancelledError:
+            if session is not None:
+                with suppress(Exception):
+                    await asyncio.shield(session.abort_and_close())
+            if artifacts is not None:
+                with suppress(Exception):
+                    await asyncio.shield(self._cleanup_failed_preflight(artifacts))
+            raise
         except Exception:
             if session is not None:
                 await session.abort_and_close()
+            if artifacts is not None:
+                await self._cleanup_failed_preflight(artifacts)
             raise
 
-    async def _create_remote_artifacts(self, router_id: str) -> HighRiskArtifacts:
+    def _new_artifacts(self, router_id: str) -> HighRiskArtifacts:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         safe_router_id = "".join(
             character if character.isalnum() else "-" for character in router_id
@@ -187,21 +201,6 @@ class HighRiskService:
         secret_id = f"backup:{router_id}:{timestamp}:{secrets.token_hex(6)}"
         password = secrets.token_urlsafe(24)
         self._secrets.set(secret_id, password)
-        backend = self._backend_factory()
-        backup = await backend.call_tool(
-            "create_backup",
-            {"routerId": router_id, "name": name, "password": password},
-        )
-        if backup.is_error:
-            self._secrets.delete(secret_id)
-            raise HighRiskError(f"MikroMCP could not create pre-flight backup: {backup.text}")
-        exported = await backend.call_tool(
-            "export_config",
-            {"routerId": router_id, "file": name, "compact": False},
-        )
-        if exported.is_error:
-            self._secrets.delete(secret_id)
-            raise HighRiskError(f"MikroMCP could not create pre-flight export: {exported.text}")
         directory = self._backup_root / safe_router_id / f"{timestamp}-{name[-8:]}"
         return HighRiskArtifacts(
             router_id=router_id,
@@ -213,6 +212,59 @@ class HighRiskService:
             export_remote_name=f"{name}.rsc",
             backup_secret_id=secret_id,
         )
+
+    async def _create_remote_artifacts(self, artifacts: HighRiskArtifacts) -> None:
+        password = self._secrets.get(artifacts.backup_secret_id)
+        if password is None:
+            raise HighRiskError("The encrypted password for this pre-flight backup is unavailable")
+        backend = self._backend_factory()
+        backup = await backend.call_tool(
+            "create_backup",
+            {
+                "routerId": artifacts.router_id,
+                "name": artifacts.backup_remote_name.removesuffix(".backup"),
+                "password": password,
+            },
+        )
+        if backup.is_error:
+            raise HighRiskError(f"MikroMCP could not create pre-flight backup: {backup.text}")
+        exported = await backend.call_tool(
+            "export_config",
+            {
+                "routerId": artifacts.router_id,
+                "file": artifacts.export_remote_name.removesuffix(".rsc"),
+                "compact": False,
+            },
+        )
+        if exported.is_error:
+            raise HighRiskError(f"MikroMCP could not create pre-flight export: {exported.text}")
+
+    async def _cleanup_failed_preflight(self, artifacts: HighRiskArtifacts) -> None:
+        """Remove only this attempt's files and encrypted secret after failed entry."""
+
+        backend: BackupBackend | None = None
+        with suppress(Exception):
+            backend = self._backend_factory()
+        if backend is not None:
+            for remote_name in (artifacts.backup_remote_name, artifacts.export_remote_name):
+                with suppress(Exception):
+                    await backend.call_tool(
+                        "delete_file",
+                        {"routerId": artifacts.router_id, "name": remote_name, "dryRun": False},
+                    )
+
+        for local_path in (
+            artifacts.backup_path,
+            artifacts.export_path,
+            artifacts.manifest_path,
+        ):
+            with suppress(OSError):
+                local_path.unlink()
+        for directory in (artifacts.manifest_path.parent, artifacts.manifest_path.parent.parent):
+            with suppress(OSError):
+                directory.rmdir()
+        with suppress(Exception):
+            self._secrets.delete(artifacts.backup_secret_id)
 
     def _write_known_hosts(self, target: SshTarget, public_key: str) -> Path:
         host = target.host if target.port == 22 else f"[{target.host}]:{target.port}"

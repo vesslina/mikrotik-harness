@@ -1,10 +1,27 @@
 # MikroTik Harness
 
+<p align="center">
+  <img src="pic-git.PNG" alt="MikroTik Harness" width="760">
+</p>
+
+<p align="center">
+  A keyboard-first LLM harness for inspecting and operating MikroTik RouterOS.
+</p>
+
+<p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-e05d44.svg" alt="version 0.1.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/node-22%2B-339933.svg" alt="Node.js 22 or newer">
+  <img src="https://img.shields.io/badge/RouterOS-7.x-293845.svg" alt="RouterOS 7.x">
+  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.9.0-6f42c1.svg" alt="MikroMCP v1.9.0">
+  <img src="https://img.shields.io/badge/UI-Textual%208.x-5B3CC4.svg" alt="Textual 8.x">
+</p>
+
 [Русская версия](README_RU.md)
 
-`mth` is a keyboard-first LLM harness for RouterOS. It discovers MikroTik devices,
-registers a selected router through MikroMCP, and provides a provider-neutral agent loop
-for inspecting and changing the connected device.
+`mth` discovers MikroTik devices, registers a selected router through MikroMCP, and provides a
+provider-neutral agent loop for inspecting and changing the connected device.
 
 The project is built around three boundaries:
 
@@ -144,8 +161,9 @@ vault when available, with an encrypted Fernet fallback; environment-variable re
 supported. `/models` selects or deletes saved presets.
 
 The chat supports Russian/English UI selection, bounded in-process conversation memory, model
-warm-up, normalized reasoning/tool events, inline approval forms, session history, transcript
-copying, and command hints after `/`.
+warm-up, streamed OpenAI-compatible responses with a toggleable thinking panel, normalized
+reasoning/tool events, inline approval forms, session history, transcript copying, and command
+hints after `/`.
 
 ## Commands
 
@@ -186,3 +204,7 @@ The backend boundary and known MikroMCP gaps are documented in
 architecture is in [`docs/block-b-architecture.md`](docs/block-b-architecture.md), and the
 three-level live model prompts are in
 [`docs/model-evaluation-prompts-ru.md`](docs/model-evaluation-prompts-ru.md).
+
+## License
+
+MikroTik Harness is released under the [MIT License](LICENSE).

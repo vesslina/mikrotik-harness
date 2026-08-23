@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import replace
+from unittest.mock import patch
 
 from mth.agent import (
     AgentMessage,
@@ -12,10 +13,12 @@ from mth.agent import (
     ProviderKind,
     ProviderPreset,
     ProviderReply,
+    ProviderStreamChunk,
     ProviderToolCall,
     ProviderWarmup,
     ReadOnlyAgentLoop,
     ReasoningControl,
+    ReasoningDelta,
     ReasoningStatus,
     RunbookProposal,
     ToolCallFormat,
@@ -267,6 +270,52 @@ def test_openai_compatible_client_sends_tools_and_parses_tool_call() -> None:
     assert reply.tool_calls[0].arguments == {"routerId": "router"}
 
 
+def test_openai_compatible_client_streams_sse_reasoning_and_content() -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+        def __iter__(self):
+            return iter(
+                (
+                    'data: {"choices":[{"delta":{"reasoning_content":"дум"}}]}\n'.encode(),
+                    'data: {"choices":[{"delta":{"content":"Привет"}}]}\n'.encode(),
+                    b"data: [DONE]\n",
+                )
+            )
+
+    def open_url(request, timeout):
+        captured["stream"] = json.loads(request.data.decode("utf-8"))["stream"]
+        captured["accept"] = request.headers["Accept"]
+        captured["timeout"] = timeout
+        return Response()
+
+    async def scenario() -> list[ProviderStreamChunk]:
+        client = OpenAICompatibleClient(
+            base_url="http://localhost:1234/v1",
+            model="test-model",
+        )
+        return [
+            chunk
+            async for chunk in client.stream([{"role": "user", "content": "Привет"}])
+        ]
+
+    with patch("mth.agent.providers.urllib.request.urlopen", open_url):
+        chunks = asyncio.run(scenario())
+
+    assert captured == {"stream": True, "accept": "text/event-stream", "timeout": 60.0}
+    assert [chunk.reasoning for chunk in chunks if chunk.reasoning] == ["дум"]
+    assert [chunk.content for chunk in chunks if chunk.content] == ["Привет"]
+    assert chunks[-1].reply is not None
+    assert chunks[-1].reply.content == "Привет"
+    assert chunks[-1].reply.reasoning == "дум"
+
+
 def test_openai_compatible_client_parses_lm_studio_reasoning_content() -> None:
     def transport(url, headers, body, timeout) -> bytes:
         return json.dumps(
@@ -326,6 +375,41 @@ def test_loop_recovers_labelled_final_answer_from_reasoning_only_reply() -> None
         assert events[0].recovered_final_answer is True
         assert isinstance(events[1], AgentMessage)
         assert events[1].text == "Привет! Да, я здесь."
+
+    asyncio.run(scenario())
+
+
+def test_loop_emits_streamed_reasoning_to_progress_sink_without_polluting_history() -> None:
+    async def scenario() -> None:
+        class Provider:
+            async def complete(self, messages, tools=()) -> ProviderReply:
+                raise AssertionError("streaming provider should not use complete")
+
+            async def stream(self, messages, tools=()):
+                yield ProviderStreamChunk(reasoning="проверяю ")
+                yield ProviderStreamChunk(reasoning="состояние")
+                yield ProviderStreamChunk(reply=ProviderReply("Готово.", ()))
+
+        provider = Provider()
+        loop = ReadOnlyAgentLoop(
+            preset=replace(
+                _preset(),
+                capabilities=replace(_preset().capabilities, supports_streaming=True),
+            ),
+            provider=provider,
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+        )
+        progress = []
+        loop.set_progress_sink(progress.append)
+        events = await loop.run("Проверь состояние", AgentMode.PLAN)
+
+        assert [event.text for event in progress if isinstance(event, ReasoningDelta)] == [
+            "проверяю ",
+            "состояние",
+        ]
+        assert not any(isinstance(event, ReasoningDelta) for event in events)
+        assert any(isinstance(event, AgentMessage) and event.text == "Готово." for event in events)
 
     asyncio.run(scenario())
 

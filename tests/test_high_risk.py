@@ -56,6 +56,27 @@ class _Writer:
         return None
 
 
+class _ReleaseWriter(_Writer):
+    def __init__(self, reader: _Reader) -> None:
+        super().__init__(reader)
+        self.safe = False
+
+    def write(self, payload: bytes) -> None:
+        if b"\x18" in payload and b":put " not in payload:
+            self.writes.append(payload)
+            if self.safe:
+                self.safe = False
+                self.reader.put(b"[session committed]\r\n[admin@MikroTik] >\r\n")
+            else:
+                self.safe = True
+                self.reader.put(
+                    b"Taking Safe Mode session... Success!\r\n"
+                    b"[admin@MikroTik] <SAFE> >\r\n"
+                )
+            return
+        super().write(payload)
+
+
 class _Connection:
     def __init__(self) -> None:
         self.closed = False
@@ -121,6 +142,21 @@ def test_persistent_pty_frames_output_verifies_safe_mode_and_aborts() -> None:
         await session.abort_and_close()
         assert connection.closed is True
         assert any(b"\x03\x04" in write for write in writer.writes)
+
+    asyncio.run(scenario())
+
+
+def test_commit_verifies_release_from_the_new_non_safe_prompt() -> None:
+    async def scenario() -> None:
+        reader = _Reader()
+        writer = _ReleaseWriter(reader)
+        connection = _Connection()
+        session = RouterOsSshSession(connection, _Process(reader, writer))
+
+        assert await session.enter_safe_mode() is True
+        assert await session.commit_and_close() is True
+        assert session.safe_mode_active is False
+        assert connection.closed is True
 
     asyncio.run(scenario())
 
@@ -253,6 +289,13 @@ class _PreflightSession:
         self.aborted = True
 
 
+class _FailingPreflightSession(_PreflightSession):
+    async def download(self, remote_name: str, local_path: Path) -> None:
+        await super().download(remote_name, local_path)
+        if len(self.downloads) == 2:
+            raise OSError("simulated partial SFTP download")
+
+
 def test_preflight_creates_and_verifies_local_backup_and_export(monkeypatch, tmp_path) -> None:
     async def scenario() -> None:
         store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
@@ -299,5 +342,117 @@ def test_preflight_creates_and_verifies_local_backup_and_export(monkeypatch, tmp
             session.artifacts.export_remote_name,
         ]
         assert "router-password" not in session.artifacts.manifest_path.read_text(encoding="utf-8")
+
+    asyncio.run(scenario())
+
+
+def test_failed_preflight_cleans_remote_files_local_partials_and_secret(
+    monkeypatch, tmp_path
+) -> None:
+    async def scenario() -> None:
+        store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
+        store.persist(
+            PendingRegistration(
+                router_id="mikrotik-afe23e",
+                host="192.168.56.103",
+                port=443,
+                username="admin",
+                password="router-password",
+                ros_version="7.21.5",
+                tls_fingerprint="ab" * 32,
+            )
+        )
+        backend = _BackupBackend()
+        preflight_session = _FailingPreflightSession()
+
+        async def connection_factory(_target, _known_hosts):
+            return preflight_session
+
+        async def get_host_key(*_args, **_kwargs):
+            return _Key()
+
+        monkeypatch.setattr(
+            "mth.core.high_risk.service.asyncssh.get_server_host_key", get_host_key
+        )
+        service = HighRiskService(
+            store,
+            backend_factory=lambda: backend,
+            connection_factory=connection_factory,
+        )
+        key = await service.probe_host_key("mikrotik-afe23e")
+        service.trust_host_key(key)
+
+        try:
+            await service.enter("mikrotik-afe23e")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("preflight should fail")
+
+        assert preflight_session.aborted is True
+        assert [name for name, _arguments in backend.calls] == [
+            "create_backup",
+            "export_config",
+            "delete_file",
+            "delete_file",
+        ]
+        delete_arguments = [arguments for name, arguments in backend.calls if name == "delete_file"]
+        assert {arguments["name"] for arguments in delete_arguments} == {
+            backend.calls[0][1]["name"] + ".backup",
+            backend.calls[0][1]["name"] + ".rsc",
+        }
+        assert not list((tmp_path / "high-risk-backups").rglob("*"))
+        assert service._secrets._load()["secrets"] == {}
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_preflight_also_cleans_secret_and_remote_artifacts(monkeypatch, tmp_path) -> None:
+    async def scenario() -> None:
+        store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
+        store.persist(
+            PendingRegistration(
+                router_id="mikrotik-afe23e",
+                host="192.168.56.103",
+                port=443,
+                username="admin",
+                password="router-password",
+                ros_version="7.21.5",
+                tls_fingerprint="ab" * 32,
+            )
+        )
+        backend = _BackupBackend()
+
+        async def connection_factory(_target, _known_hosts):
+            raise asyncio.CancelledError
+
+        async def get_host_key(*_args, **_kwargs):
+            return _Key()
+
+        monkeypatch.setattr(
+            "mth.core.high_risk.service.asyncssh.get_server_host_key", get_host_key
+        )
+        service = HighRiskService(
+            store,
+            backend_factory=lambda: backend,
+            connection_factory=connection_factory,
+        )
+        key = await service.probe_host_key("mikrotik-afe23e")
+        service.trust_host_key(key)
+
+        try:
+            await service.enter("mikrotik-afe23e")
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("preflight cancellation should propagate")
+
+        assert [name for name, _arguments in backend.calls] == [
+            "create_backup",
+            "export_config",
+            "delete_file",
+            "delete_file",
+        ]
+        assert service._secrets._load()["secrets"] == {}
 
     asyncio.run(scenario())

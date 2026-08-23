@@ -15,6 +15,7 @@ from mth.agent.events import (
     FinalOutcome,
     FinalSummary,
     PlannedAction,
+    ReasoningDelta,
     ReasoningStatus,
     RiskLevel,
     RunbookProposal,
@@ -30,6 +31,7 @@ from mth.agent.providers import (
     ProviderError,
     ProviderErrorCode,
     ProviderReply,
+    ProviderStreamChunk,
     ProviderToolCall,
 )
 from mth.agent.secret_store import (
@@ -50,6 +52,7 @@ __all__ = [
     "ModelCapabilities",
     "OpenAICompatibleClient",
     "PlannedAction",
+    "ReasoningDelta",
     "PresetPaths",
     "ProviderKind",
     "ProviderError",
@@ -59,6 +62,7 @@ __all__ = [
     "ProviderSecretPaths",
     "ProviderSecretStore",
     "ProviderReply",
+    "ProviderStreamChunk",
     "ProviderToolCall",
     "ProviderWarmup",
     "ChatProvider",

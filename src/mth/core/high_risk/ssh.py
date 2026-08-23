@@ -190,14 +190,17 @@ class RouterOsSshSession:
                 return False
             marker = self._marker()
             try:
+                # Drop the prompt left by the last framed command.  Release
+                # verification must inspect the prompt produced by this Ctrl+X.
+                self._pending = ""
                 await self._write(b"\x18")
-                raw = await self._read_until_text("safe mode released", 8, 32_768)
+                raw = await self._read_until_prompt_state(8, 32_768, safe=False)
                 await self._write(self._marker_command(marker))
-                await self._read_until_marker(marker, 8, 32_768)
+                marker_output, _ = await self._read_until_marker(marker, 8, 32_768)
             except (asyncssh.Error, OSError, ConnectionError, TimeoutError) as error:
                 self._mark_transport_lost(self._transport_diagnostic(error))
                 return False
-            released = "safe mode released" in raw.casefold() and "<safe>" not in raw.casefold()
+            released = self._prompt_is_safe(raw + marker_output) is False
             if released:
                 self._safe_mode_active = False
                 await self._close_transport()
@@ -306,6 +309,39 @@ class RouterOsSshSession:
             lowered = captured.casefold()
             if all(needle.casefold() in lowered for needle in needles):
                 return captured
+
+    async def _read_until_prompt_state(
+        self,
+        timeout: float,
+        max_output_bytes: int,
+        *,
+        safe: bool,
+    ) -> str:
+        """Wait for a RouterOS prompt and verify whether it carries ``<SAFE>``."""
+
+        deadline = time.monotonic() + timeout
+        captured = self._pending
+        self._pending = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            data = await self._read_stdout(remaining)
+            if not data:
+                raise ConnectionError("SSH stream closed")
+            captured += self._decode(data)
+            if len(captured.encode("utf-8")) > max_output_bytes:
+                captured = captured[-max_output_bytes:]
+            if self._prompt_is_safe(captured) is safe:
+                return captured
+
+    @classmethod
+    def _prompt_is_safe(cls, text: str) -> bool | None:
+        normalized = cls._ANSI.sub("", text.replace("\x9b", "\x1b["))
+        prompts = re.findall(r"\[[^\]\r\n]+\]\s+(?:<SAFE>\s+)?", normalized, re.IGNORECASE)
+        if not prompts:
+            return None
+        return "<safe>" in prompts[-1].casefold()
 
     async def _read_until_safe_mode(self, timeout: float, max_output_bytes: int) -> str:
         """Wait for RouterOS' version-specific Safe Mode confirmation.
@@ -563,7 +599,9 @@ class RouterOsSshSession:
 
     async def _close_transport(self) -> None:
         if not self._alive:
-            return
+            is_closed = getattr(self._connection, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return
         self._alive = False
         self._connection.close()
         wait_closed = getattr(self._connection, "wait_closed", None)

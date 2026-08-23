@@ -35,6 +35,14 @@ class ReasoningStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningDelta:
+    """One streamed reasoning fragment for the transient thinking panel."""
+
+    text: str
+    kind: str = field(default="reasoning_delta", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedAction:
     summary: str
     tool_names: tuple[str, ...]
@@ -94,6 +102,7 @@ class FinalSummary:
 AgentEvent: TypeAlias = (
     AgentMessage
     | ReasoningStatus
+    | ReasoningDelta
     | PlannedAction
     | RunbookProposal
     | ToolCall

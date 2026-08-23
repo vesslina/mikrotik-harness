@@ -1,5 +1,23 @@
 # MikroTik Harness
 
+<p align="center">
+  <img src="pic-git.PNG" alt="MikroTik Harness" width="760">
+</p>
+
+<p align="center">
+  Клавиатурный LLM-harness для диагностики и управления MikroTik RouterOS.
+</p>
+
+<p align="center">
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-e05d44.svg" alt="версия 0.1.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6.svg" alt="лицензия MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11 или новее">
+  <img src="https://img.shields.io/badge/node-22%2B-339933.svg" alt="Node.js 22 или новее">
+  <img src="https://img.shields.io/badge/RouterOS-7.x-293845.svg" alt="RouterOS 7.x">
+  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.9.0-6f42c1.svg" alt="MikroMCP v1.9.0">
+  <img src="https://img.shields.io/badge/UI-Textual%208.x-5B3CC4.svg" alt="Textual 8.x">
+</p>
+
 [English README](README.md)
 
 `mth` — клавиатурный LLM-harness для RouterOS. Он обнаруживает MikroTik по MNDP,
@@ -125,7 +143,8 @@ RouterOS application keepalive AsyncSSH отключён; живость опр�
 `/model` сохраняет preset локальной модели или любого OpenAI-compatible endpoint.
 Credentials хранятся отдельно в защищённом vault; `/models` выбирает или удаляет preset.
 Поддерживаются русский/английский UI, ограниченная память диалога, warm-up модели,
-нормализованные reasoning/tool events, inline approval, история сессий и копирование transcript.
+потоковые OpenAI-compatible ответы с переключаемым блоком размышлений, нормализованные
+reasoning/tool events, inline approval, история сессий и копирование transcript.
 
 ```text
 /help       справка
@@ -163,3 +182,7 @@ python -m mth --help
 архитектура Block B — в [docs/block-b-architecture.md](docs/block-b-architecture.md), а
 live-промпты для проверки моделей — в
 [docs/model-evaluation-prompts-ru.md](docs/model-evaluation-prompts-ru.md).
+
+## Лицензия
+
+MikroTik Harness распространяется по [лицензии MIT](LICENSE).

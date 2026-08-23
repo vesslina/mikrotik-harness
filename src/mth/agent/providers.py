@@ -4,7 +4,7 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -40,6 +40,15 @@ class ProviderReply:
     reasoning_tokens: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderStreamChunk:
+    """Incremental provider output; ``reply`` is populated once the stream ends."""
+
+    content: str = ""
+    reasoning: str = ""
+    reply: ProviderReply | None = None
+
+
 class ChatProvider(Protocol):
     async def complete(
         self,
@@ -52,7 +61,7 @@ HttpTransport = Callable[[str, Mapping[str, str], bytes, float], bytes]
 
 
 class OpenAICompatibleClient:
-    """Minimal non-streaming transport for an OpenAI-compatible chat endpoint."""
+    """Small stdlib OpenAI-compatible transport with optional SSE streaming."""
 
     def __init__(
         self,
@@ -74,17 +83,8 @@ class OpenAICompatibleClient:
         messages: Sequence[Mapping[str, Any]],
         tools: Sequence[McpTool] = (),
     ) -> ProviderReply:
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [dict(message) for message in messages],
-            "stream": False,
-        }
-        if tools:
-            payload["tools"] = [self._tool_payload(tool) for tool in tools]
-            payload["tool_choice"] = "auto"
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload = self._payload(messages, tools, stream=False)
+        headers = self._headers()
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         try:
@@ -199,6 +199,187 @@ class OpenAICompatibleClient:
             reasoning=reasoning,
             reasoning_tokens=reasoning_tokens,
         )
+
+    async def stream(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[McpTool] = (),
+    ) -> AsyncIterator[ProviderStreamChunk]:
+        """Read OpenAI SSE chunks without buffering the provider response."""
+
+        payload = self._payload(messages, tools, stream=True)
+        headers = self._headers()
+        queue: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def publish(item: bytes | BaseException | None) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(
+                    f"{self.base_url}/chat/completions",
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    for line in response:
+                        publish(bytes(line))
+            except urllib.error.HTTPError as error:
+                publish(self._http_provider_error(error))
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                publish(
+                    ProviderError(
+                        ProviderErrorCode.CONNECTION_FAILED,
+                        f"Could not reach the model provider: {error}",
+                    )
+                )
+            finally:
+                publish(None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        content: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        reasoning_tokens: int | None = None
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                line = item.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                if not line.startswith("data:") and not line.startswith("{"):
+                    continue
+                data = line[5:].strip() if line.startswith("data:") else line
+                if data == "[DONE]":
+                    continue
+                try:
+                    document = json.loads(data)
+                except json.JSONDecodeError as error:
+                    raise ProviderError(
+                        ProviderErrorCode.INVALID_RESPONSE,
+                        f"Provider returned an invalid streaming event: {error}",
+                    ) from error
+                if not isinstance(document, dict):
+                    continue
+                usage = document.get("usage")
+                if isinstance(usage, dict):
+                    details = usage.get("completion_tokens_details")
+                    if isinstance(details, dict) and isinstance(
+                        details.get("reasoning_tokens"), int
+                    ):
+                        reasoning_tokens = details["reasoning_tokens"]
+                choices = document.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta") or choice.get("message") or {}
+                if not isinstance(delta, dict):
+                    continue
+                content_delta = delta.get("content") or ""
+                reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if isinstance(content_delta, str) and content_delta:
+                    content.append(content_delta)
+                    yield ProviderStreamChunk(content=content_delta)
+                if isinstance(reasoning_delta, str) and reasoning_delta:
+                    reasoning.append(reasoning_delta)
+                    yield ProviderStreamChunk(reasoning=reasoning_delta)
+                raw_calls = delta.get("tool_calls") or []
+                if isinstance(raw_calls, list):
+                    for raw_call in raw_calls:
+                        if not isinstance(raw_call, dict):
+                            continue
+                        index = raw_call.get("index", len(calls))
+                        if not isinstance(index, int):
+                            continue
+                        entry = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                        if isinstance(raw_call.get("id"), str):
+                            entry["id"] = raw_call["id"]
+                        function = raw_call.get("function")
+                        if isinstance(function, dict):
+                            if isinstance(function.get("name"), str):
+                                entry["name"] = function["name"]
+                            if isinstance(function.get("arguments"), str):
+                                entry["arguments"] += function["arguments"]
+        finally:
+            await task
+
+        tool_calls: list[ProviderToolCall] = []
+        for index in sorted(calls):
+            entry = calls[index]
+            try:
+                arguments = json.loads(entry["arguments"] or "{}")
+            except json.JSONDecodeError as error:
+                raise ProviderError(
+                    ProviderErrorCode.INVALID_RESPONSE,
+                    f"Provider returned malformed streamed tool arguments: {error}",
+                ) from error
+            if not isinstance(arguments, dict):
+                raise ProviderError(
+                    ProviderErrorCode.INVALID_RESPONSE,
+                    "Provider returned streamed tool arguments that are not an object",
+                )
+            tool_calls.append(
+                ProviderToolCall(
+                    call_id=entry["id"] or f"call-{index + 1}",
+                    name=entry["name"],
+                    arguments=arguments,
+                )
+            )
+        yield ProviderStreamChunk(
+            reply=ProviderReply(
+                content="".join(content),
+                tool_calls=tuple(tool_calls),
+                reasoning="".join(reasoning),
+                reasoning_tokens=reasoning_tokens,
+            )
+        )
+
+    def _payload(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[McpTool],
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(message) for message in messages],
+            "stream": stream,
+        }
+        if tools:
+            payload["tools"] = [self._tool_payload(tool) for tool in tools]
+            payload["tool_choice"] = "auto"
+        return payload
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    @classmethod
+    def _http_provider_error(cls, error: urllib.error.HTTPError) -> ProviderError:
+        detail = cls._http_error_detail(error)
+        lowered = detail.lower()
+        if error.code in {401, 403}:
+            code = ProviderErrorCode.AUTHENTICATION_FAILED
+        elif error.code == 404 or (
+            error.code == 400
+            and "model" in lowered
+            and any(marker in lowered for marker in ("not found", "unknown", "invalid"))
+        ):
+            code = ProviderErrorCode.MODEL_NOT_FOUND
+        else:
+            code = ProviderErrorCode.CONNECTION_FAILED
+        return ProviderError(code, detail)
 
     @staticmethod
     def _http_error_detail(error: urllib.error.HTTPError) -> str:
