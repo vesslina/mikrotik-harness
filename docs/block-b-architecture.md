@@ -91,7 +91,9 @@ catalog. It records PLAN/READY reads, scenario and typed writes, missing runbook
 uncovered backend writes, and accidental raw-write exposure. Tests can therefore fail closed on
 drift without turning a historical tool count into policy.
 
-Every real call is rebound to the connected `routerId`. Fleet-global tools, management tools,
+Every model-facing schema hides harness-owned `routerId` and `confirmationToken` fields. Every real
+call is rebound to the connected `routerId`; HIGH RISK direct destructive calls complete the
+MikroMCP confirmation challenge internally with identical arguments. Fleet-global tools, management tools,
 `apply_plan`, and `run_command` never reach the model. Device output is treated as untrusted data
 and recursively redacted before it enters either model context or normalized UI events.
 

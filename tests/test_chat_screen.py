@@ -214,6 +214,51 @@ def test_streamed_thinking_is_inserted_before_answer_and_can_be_hidden(tmp_path)
     asyncio.run(scenario())
 
 
+def test_rag_sources_and_tool_errors_are_visible_in_transcript(tmp_path) -> None:
+    async def scenario() -> None:
+        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store.save(_preset())
+        screen = _screen(
+            _profile(),
+            _registration(),
+            preset_store=store,
+            agent_factory=lambda _preset, _key: _Runner(),
+        )
+        app = _ChatApp(screen)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            screen._render_event(
+                ToolResult(
+                    call_id="rag-1",
+                    tool_name="search_routeros_docs",
+                    content=("manual excerpt",),
+                    structured_content={
+                        "hits": [
+                            {"sourceUrl": "https://manual.mikrotik.com/docs/ip-address.md"},
+                            {"sourceUrl": "https://manual.mikrotik.com/docs/ip-address.md"},
+                        ]
+                    },
+                    is_error=False,
+                )
+            )
+            screen._render_event(
+                ToolResult(
+                    call_id="write-1",
+                    tool_name="manage_ip_address",
+                    content=("Interface ether3 was not found.",),
+                    structured_content=None,
+                    is_error=True,
+                )
+            )
+
+            transcript = screen.query_one("#transcript").plain_text()
+            assert transcript.count("https://manual.mikrotik.com/docs/ip-address.md") == 1
+            assert "Interface ether3 was not found." in transcript
+
+    asyncio.run(scenario())
+
+
 def test_router_disconnect_is_reported_and_subsequent_prompt_fails_fast(tmp_path) -> None:
     async def scenario() -> None:
         store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))

@@ -158,8 +158,9 @@ class ToolCatalogRouter:
     ) -> CapabilitySelection:
         domains = self._normalize_domains(raw_domains)
         safe = self.filter_read_only(catalog)
+        live_names = {tool.name for tool in catalog}
         selected = tuple(
-            tool
+            self._for_model(tool)
             for tool in safe
             if tool.name in self.BASE_TOOLS
             or any(self._belongs(tool.name, domain) for domain in domains)
@@ -168,29 +169,40 @@ class ToolCatalogRouter:
             self._proposal_tool(definition)
             for definition in self.registry.all()
             if definition.capability_domains.intersection(domains)
+            and definition.write_tools.issubset(live_names)
         )
         typed_proposals = typed_proposals_for_domains(tuple(catalog), domains)
+        by_name = {self.selector_tool.name: self.selector_tool}
+        for tool in selected:
+            by_name.setdefault(tool.name, tool)
+        for tool in (*proposal_tools, *typed_proposals):
+            by_name[tool.name] = tool
         return CapabilitySelection(
             domains=domains,
-            tools=(self.selector_tool, *selected, *proposal_tools, *typed_proposals),
+            tools=tuple(by_name.values()),
         )
 
     def plan_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
         """All live RouterOS reads are available for PLAN-mode reconnaissance."""
 
-        return self.filter_read_only(catalog)
+        return tuple(self._for_model(tool) for tool in self.filter_read_only(catalog))
 
     def ready_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
         """Expose every safe read plus approval wrappers for reviewed write schemas."""
 
         live = tuple(catalog)
+        live_names = {tool.name for tool in live}
         scenario_proposals = tuple(
-            self._proposal_tool(definition) for definition in self.registry.all()
+            self._proposal_tool(definition)
+            for definition in self.registry.all()
+            if definition.write_tools.issubset(live_names)
         )
         generic_proposals = typed_proposals_for_domains(live, None)
-        by_name: dict[str, McpTool] = {}
-        for tool in (*self.filter_read_only(live), *scenario_proposals, *generic_proposals):
-            by_name.setdefault(tool.name, tool)
+        by_name = {
+            tool.name: self._for_model(tool) for tool in self.filter_read_only(live)
+        }
+        for tool in (*scenario_proposals, *generic_proposals):
+            by_name[tool.name] = tool
         return tuple(by_name.values())
 
     def ready_contract(self, catalog: Sequence[McpTool]) -> ReadyCapabilityContract:
@@ -244,10 +256,29 @@ class ToolCatalogRouter:
         Proposal tools remain available as an optional structured planning convenience.
         """
 
-        by_name: dict[str, McpTool] = {}
-        for tool in (*catalog, *self.ready_tools(catalog), self.ssh_exec_tool):
-            by_name.setdefault(tool.name, tool)
+        by_name = {tool.name: self._for_model(tool) for tool in catalog}
+        for tool in (*self.ready_tools(catalog), self.ssh_exec_tool):
+            by_name[tool.name] = tool
         return tuple(by_name.values())
+
+    @staticmethod
+    def _for_model(tool: McpTool) -> McpTool:
+        """Hide connection/confirmation fields owned and injected by the harness."""
+
+        schema = dict(tool.input_schema)
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return tool
+        visible = dict(properties)
+        visible.pop("routerId", None)
+        visible.pop("confirmationToken", None)
+        schema["properties"] = visible
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [
+                name for name in required if name not in {"routerId", "confirmationToken"}
+            ]
+        return McpTool(tool.name, tool.description, schema, dict(tool.annotations))
 
     @property
     def ssh_exec_tool(self) -> McpTool:

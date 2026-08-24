@@ -130,8 +130,9 @@ classified; it does not mean that unsafe or operational tools are exposed in REA
 
 HIGH RISK is an explicit elevated mode for open-ended RouterOS work. It keeps all READY tools and
 adds the live MikroMCP catalog, direct write tools, and `ssh_exec` for one-line RouterOS CLI
-commands. There is no per-command approval gate; the mode itself is the operator's explicit
-elevation decision.
+commands. Direct tools have no per-command approval gate: the harness owns MikroMCP's confirmation
+token handshake after the operator's elevation decision. Optional `propose_*` previews still open
+the normal reviewed workflow when explicitly selected.
 
 Before the composer is unlocked, the harness:
 
@@ -156,7 +157,8 @@ The HIGH RISK system prompt requires a seven-step cycle: understand, inspect, pl
 execute, verify, and report. Reasoning is kept in English for token efficiency; user-facing
 conversation and reports are Russian. When a validated portable documentation pack is installed,
 the model also receives a local read-only `search_routeros_docs` tool. It searches with a short
-English query and receives bounded, source-linked excerpts marked as untrusted reference evidence.
+English RouterOS menu-path query and receives bounded excerpts marked as untrusted reference
+evidence. Their source URLs are also shown directly in the transcript.
 
 ## Portable RAG pack
 

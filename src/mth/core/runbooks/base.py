@@ -516,14 +516,10 @@ class RunbookExecutor:
 
     @staticmethod
     def _confirmation_token(result: McpToolResult) -> str:
-        structured = result.structured_content or {}
-        details = structured.get("details")
-        token = details.get("confirmationToken") if isinstance(details, dict) else None
+        token = result.confirmation_token
         if (
-            not result.is_error
-            or structured.get("code") != "CONFIRMATION_REQUIRED"
-            or not isinstance(token, str)
-            or not token
+            (result.structured_content or {}).get("code") != "CONFIRMATION_REQUIRED"
+            or token is None
         ):
             raise RunbookError(
                 "CONFIRMATION_GATE_BYPASSED",

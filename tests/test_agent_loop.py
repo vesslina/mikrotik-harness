@@ -61,9 +61,12 @@ class _Backend:
         self.catalog_calls += 1
         schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
         read_only = {"readOnlyHint": True, "destructiveHint": False}
+        write = {"readOnlyHint": False, "destructiveHint": True}
         return (
             McpTool("list_interfaces", "Read interfaces", schema, read_only),
-            McpTool("manage_bridge", "Write bridge", schema, read_only),
+            McpTool("manage_bridge", "Write bridge", schema, write),
+            McpTool("manage_bridge_port", "Write bridge port", schema, write),
+            McpTool("manage_pppoe_client", "Write PPPoE client", schema, write),
             McpTool("run_command", "Raw escape hatch", schema, read_only),
         )
 
@@ -744,6 +747,176 @@ def test_high_risk_executes_raw_mcp_writes_and_persistent_ssh_without_proposal()
         assert executor.commands == [("/interface print", 20, 65_536)]
         assert not any(isinstance(event, RunbookProposal) for event in events)
         assert any(isinstance(event, ToolResult) for event in events)
+
+    asyncio.run(scenario())
+
+
+def test_high_risk_routes_harness_proposals_locally() -> None:
+    async def scenario() -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "routerId": {"type": "string"},
+                "action": {"type": "string", "enum": ["add", "update", "remove"]},
+                "address": {"type": "string"},
+                "interface": {"type": "string"},
+                "dryRun": {"type": "boolean"},
+            },
+            "required": ["routerId", "action", "address", "interface"],
+        }
+
+        class Backend:
+            async def list_tools(self) -> tuple[McpTool, ...]:
+                return (McpTool("manage_ip_address", "Manage IP", schema, {}),)
+
+            async def call_tool(self, name, arguments=None) -> McpToolResult:
+                raise AssertionError(f"harness proposal leaked to MikroMCP: {name}")
+
+        class Provider:
+            async def complete(self, messages, tools=()):
+                names = {tool.name for tool in tools}
+                assert {"propose_ip_address", "propose_typed_manage_ip_address"} <= names
+                return ProviderReply(
+                    "I will open the requested preview.",
+                    (
+                        ProviderToolCall(
+                            "proposal-1",
+                            "propose_typed_manage_ip_address",
+                            {
+                                "action": "add",
+                                "address": "145.145.3.3/24",
+                                "interface": "ether3",
+                            },
+                        ),
+                    ),
+                )
+
+        class Executor:
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("proposal must not use SSH")
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=Backend(),
+            router_id="mikrotik-afe23e",
+        )
+        loop.set_high_risk_executor(Executor())
+
+        events = await loop.run("Preview an address change", AgentMode.HIGH_RISK)
+
+        proposals = [event for event in events if isinstance(event, RunbookProposal)]
+        assert len(proposals) == 1
+        assert proposals[0].runbook == "typed:manage_ip_address"
+
+    asyncio.run(scenario())
+
+
+def test_high_risk_owns_router_and_confirmation_arguments() -> None:
+    async def scenario() -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "routerId": {"type": "string"},
+                "confirmationToken": {"type": "string"},
+                "action": {"type": "string", "enum": ["add"]},
+                "address": {"type": "string"},
+                "interface": {"type": "string"},
+            },
+            "required": [
+                "routerId",
+                "confirmationToken",
+                "action",
+                "address",
+                "interface",
+            ],
+        }
+
+        class Backend:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def list_tools(self) -> tuple[McpTool, ...]:
+                return (
+                    McpTool(
+                        "manage_ip_address",
+                        "Manage IP",
+                        schema,
+                        {"readOnlyHint": False, "destructiveHint": False},
+                    ),
+                )
+
+            async def call_tool(self, name, arguments=None) -> McpToolResult:
+                assert name == "manage_ip_address"
+                call = dict(arguments or {})
+                self.calls.append(call)
+                if len(self.calls) == 1:
+                    assert "confirmationToken" not in call
+                    return McpToolResult(
+                        ("Confirmation required",),
+                        {
+                            "code": "FLEET_CONFIRMATION_REQUIRED",
+                            "details": {"confirmationToken": "token-1"},
+                        },
+                        True,
+                    )
+                assert call["confirmationToken"] == "token-1"
+                return McpToolResult(("address added",), {"changed": True}, False)
+
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, tools=()):
+                self.calls += 1
+                if self.calls == 1:
+                    tool = next(tool for tool in tools if tool.name == "manage_ip_address")
+                    properties = tool.input_schema["properties"]
+                    required = tool.input_schema["required"]
+                    assert "routerId" not in properties
+                    assert "confirmationToken" not in properties
+                    assert "routerId" not in required
+                    assert "confirmationToken" not in required
+                    return ProviderReply(
+                        "I will apply the requested address.",
+                        (
+                            ProviderToolCall(
+                                "write-1",
+                                "manage_ip_address",
+                                {
+                                    "action": "add",
+                                    "address": "145.145.3.3/24",
+                                    "interface": "ether3",
+                                    "confirmationToken": "model-controlled-token",
+                                },
+                            ),
+                        ),
+                    )
+                return ProviderReply("Адрес добавлен и результат проверен.", ())
+
+        class Executor:
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("structured write must not use SSH")
+
+        backend = Backend()
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=backend,
+            router_id="mikrotik-afe23e",
+        )
+        loop.set_high_risk_executor(Executor())
+
+        events = await loop.run("Add the address", AgentMode.HIGH_RISK)
+
+        expected = {
+            "action": "add",
+            "address": "145.145.3.3/24",
+            "interface": "ether3",
+            "routerId": "mikrotik-afe23e",
+        }
+        assert backend.calls == [expected, {**expected, "confirmationToken": "token-1"}]
+        assert any(isinstance(event, ToolResult) and not event.is_error for event in events)
 
     asyncio.run(scenario())
 

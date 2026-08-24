@@ -13,12 +13,15 @@ RouterOS Safe Mode. Only then does it unlock the composer and hand the agent an 
 ## What the model receives
 
 - every live MikroMCP tool, including direct write tools;
-- the existing `propose_*` helpers from READY as optional structured conveniences;
+- the existing `propose_*` helpers from READY as optional previews that open the normal reviewed
+  workflow;
 - `ssh_exec(command, timeout_seconds, max_output_bytes)` for one RouterOS CLI line in the one
   persistent PTY.
 
-There is no per-command approval gate in this mode. The UI displays this in red and writes a
-clear warning into the transcript. The HIGH RISK prompt requires the model to: understand the
+There is no per-command approval gate for direct tools in this mode. Harness-owned `routerId` and
+`confirmationToken` fields are hidden from the model; the harness binds the connected router and
+completes MikroMCP's exact-argument confirmation handshake internally. The UI displays the mode in
+red and writes a clear warning into the transcript. The HIGH RISK prompt requires the model to: understand the
 request; inspect tools/state/CLI syntax; make a plan; quickly check it; apply only requested
 work; quickly verify it; and report to the operator. Internal reasoning is English; operator
 messages are Russian. The prompt forbids unrequested broad or irreversible work, but the Harness

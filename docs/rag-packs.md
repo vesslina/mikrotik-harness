@@ -45,8 +45,8 @@ demonstrate queries that lexical search cannot serve reliably.
 ## Agent use
 
 HIGH RISK loads an existing valid pack once when the model is selected; it never downloads during
-a chat turn. The local `search_routeros_docs` tool accepts a short English query and returns at most
-five source-linked excerpts. Per-hit and total context limits prevent a copied pack from exhausting
+a chat turn. The local `search_routeros_docs` tool accepts a short English RouterOS menu-path query
+and returns at most five source-linked excerpts; their URLs are shown in the transcript. Per-hit and total context limits prevent a copied pack from exhausting
 the model window. Results include the connected RouterOS version but keep applicability explicitly
 unknown: documentation is evidence, not live router state, an instruction, or authority to act.
 

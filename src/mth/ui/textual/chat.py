@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import textwrap
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
@@ -2834,6 +2835,21 @@ class ChatScreen(Screen[None]):
             status = "error" if event.is_error else "done"
             style = "#ff6b62" if event.is_error else "#7fd88f"
             self._write_transcript(Text(f"    ↳ {status}", style=style), group="tool")
+            if event.is_error and event.content:
+                detail = textwrap.shorten(event.content[0], width=240, placeholder="…")
+                self._write_transcript(Text(f"      {detail}", style="#ff8a80"), group="tool")
+            if event.tool_name == "search_routeros_docs" and event.structured_content:
+                hits = event.structured_content.get("hits")
+                sources = dict.fromkeys(
+                    hit.get("sourceUrl")
+                    for hit in hits
+                    if isinstance(hit, dict) and isinstance(hit.get("sourceUrl"), str)
+                ) if isinstance(hits, list) else ()
+                label = "источник" if self._language is Language.RU else "source"
+                for source in sources:
+                    self._write_transcript(
+                        Text(f"      {label}: {source}", style="#7aa2c8"), group="tool"
+                    )
             if self._mode is AgentMode.HIGH_RISK:
                 self._refresh_mode()
         elif isinstance(event, RunbookProposal):

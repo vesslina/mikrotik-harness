@@ -1,6 +1,11 @@
 from mth.agent.tool_catalog import CAPABILITY_DOMAINS, ToolCatalogRouter
 from mth.core.mcp_client import McpTool
-from mth.core.runbooks import LanBridgeDefinition, RunbookRegistry
+from mth.core.runbooks import (
+    DEFAULT_RUNBOOK_REGISTRY,
+    LanBridgeDefinition,
+    RunbookRegistry,
+    typed_definition_for_proposal,
+)
 
 
 def _tool(name: str) -> McpTool:
@@ -9,6 +14,15 @@ def _tool(name: str) -> McpTool:
         name,
         {"type": "object", "properties": {"routerId": {"type": "string"}}},
         {"readOnlyHint": True, "destructiveHint": False},
+    )
+
+
+def _write(name: str) -> McpTool:
+    return McpTool(
+        name,
+        name,
+        {"type": "object", "properties": {"routerId": {"type": "string"}}},
+        {"readOnlyHint": False, "destructiveHint": False},
     )
 
 
@@ -23,7 +37,23 @@ def test_capability_packs_route_representative_live_tools_and_proposals() -> Non
         "containers": "get_container_config",
         "diagnostics": "traceroute",
     }
-    catalog = tuple(_tool(name) for name in representatives.values())
+    writes = (
+        "manage_address_list_entry",
+        "manage_bridge",
+        "manage_bridge_port",
+        "manage_dhcp_server",
+        "manage_dns_settings",
+        "manage_firewall_rule",
+        "manage_ip_address",
+        "manage_ip_pool",
+        "manage_pppoe_client",
+        "manage_wireguard_peer",
+        "manage_wireguard_interface",
+    )
+    catalog = (
+        *(_tool(name) for name in representatives.values()),
+        *(_write(name) for name in writes),
+    )
     router = ToolCatalogRouter()
 
     assert tuple(representatives) == CAPABILITY_DOMAINS
@@ -133,6 +163,88 @@ def test_high_risk_catalog_keeps_raw_tools_and_adds_persistent_ssh() -> None:
     assert "propose_typed_manage_ip_address" in names
 
 
+def test_every_advertised_high_risk_local_tool_has_a_local_handler() -> None:
+    router = ToolCatalogRouter()
+    schema = {
+        "type": "object",
+        "properties": {
+            "routerId": {"type": "string"},
+            "action": {"type": "string"},
+            "confirmationToken": {"type": "string"},
+        },
+        "required": ["routerId", "action", "confirmationToken"],
+    }
+    catalog = (
+        McpTool("manage_ip_address", None, schema, {"readOnlyHint": False}),
+        McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
+    )
+
+    high_risk = router.high_risk_tools(catalog)
+    backend_names = {tool.name for tool in catalog}
+    local_names = {tool.name for tool in high_risk} - backend_names - {"ssh_exec"}
+
+    for name in local_names:
+        assert (
+            DEFAULT_RUNBOOK_REGISTRY.for_proposal(name) is not None
+            or typed_definition_for_proposal(catalog, name) is not None
+        )
+
+
+def test_model_facing_backend_tools_hide_harness_owned_arguments() -> None:
+    router = ToolCatalogRouter(RunbookRegistry(()))
+    schema = {
+        "type": "object",
+        "properties": {
+            "routerId": {"type": "string"},
+            "confirmationToken": {"type": "string"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["routerId", "confirmationToken", "limit"],
+    }
+    catalog = (
+        McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
+        McpTool("manage_ip_address", None, schema, {"readOnlyHint": False}),
+    )
+
+    surfaces = (
+        router.plan_tools(catalog),
+        router.ready_tools(catalog),
+        router.high_risk_tools(catalog),
+    )
+    for tools in surfaces:
+        for tool in tools:
+            if tool.name == "ssh_exec":
+                continue
+            properties = tool.input_schema.get("properties", {})
+            required = tool.input_schema.get("required", [])
+            assert "routerId" not in properties
+            assert "confirmationToken" not in properties
+            assert "routerId" not in required
+            assert "confirmationToken" not in required
+
+
+def test_harness_local_tool_wins_an_upstream_name_collision() -> None:
+    router = ToolCatalogRouter()
+    router_schema = {
+        "type": "object",
+        "properties": {"routerId": {"type": "string"}},
+        "required": ["routerId"],
+    }
+    catalog = (
+        McpTool("propose_ip_address", "upstream collision", router_schema, {"readOnlyHint": True}),
+        _write("manage_ip_address"),
+    )
+
+    for tools in (
+        router.select(catalog, ["addressing_services"]).tools,
+        router.ready_tools(catalog),
+        router.high_risk_tools(catalog),
+    ):
+        matches = [tool for tool in tools if tool.name == "propose_ip_address"]
+        assert len(matches) == 1
+        assert matches[0].description != "upstream collision"
+
+
 def test_ready_contract_reports_live_coverage_and_keeps_raw_writes_closed() -> None:
     router = ToolCatalogRouter(RunbookRegistry((LanBridgeDefinition(),)))
     schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
@@ -174,6 +286,9 @@ def test_ready_contract_reports_missing_runbook_dependency() -> None:
 
     assert contract.runbook_writes == ()
     assert contract.missing_runbook_writes == ("manage_bridge_port",)
+
+    names = {tool.name for tool in router.ready_tools(catalog)}
+    assert "propose_lan_bridge" not in names
 
 
 def test_reviewed_exclusion_completes_classification_without_exposing_raw_write() -> None:

@@ -80,7 +80,7 @@ class RagPack:
                         ORDER BY rank
                         LIMIT ?
                         """,
-                        (operator.join(terms), min(100, limit * 8)),
+                        (operator.join(terms), 100),
                     ).fetchall()
                     if rows:
                         break
@@ -99,16 +99,25 @@ class RagPack:
             )
             ranked.append((score, row))
         ranked.sort(key=lambda item: item[0], reverse=True)
-        return tuple(
-            RagHit(
-                text=str(row[0]),
-                heading=str(row[1]),
-                source_url=str(row[2]),
-                source_path=str(row[3]),
-                score=score,
+        hits: list[RagHit] = []
+        seen: set[tuple[str, str]] = set()
+        for score, row in ranked:
+            key = (str(row[2]), str(row[1]))
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(
+                RagHit(
+                    text=str(row[0]),
+                    heading=str(row[1]),
+                    source_url=str(row[2]),
+                    source_path=str(row[3]),
+                    score=score,
+                )
             )
-            for score, row in ranked[:limit]
-        )
+            if len(hits) == limit:
+                break
+        return tuple(hits)
 
 
 def _search_terms(value: str) -> set[str]:

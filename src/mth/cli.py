@@ -88,6 +88,10 @@ def run_tui(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="replace")
     parser = build_parser()
     args = parser.parse_args(argv)
     broadcasts = tuple(args.broadcasts) if args.broadcasts else None

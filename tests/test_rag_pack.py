@@ -111,6 +111,7 @@ def test_lexical_retrieval_eval_prefers_exact_topics_then_falls_back(tmp_path: P
             "- [Safe Mode](safe-mode.md)\n"
             "- [Bridge VLAN](bridge-vlan.md)\n"
             "- [Firewall NAT](firewall-nat.md)\n"
+            "- [Manual Network Setup](manual-network-setup.md)\n"
         ),
         "https://manual.example/safe-mode.md": (
             "# Safe Mode\nRouterOS Safe Mode rolls back changes after a session disconnect."
@@ -120,6 +121,10 @@ def test_lexical_retrieval_eval_prefers_exact_topics_then_falls_back(tmp_path: P
         ),
         "https://manual.example/firewall-nat.md": (
             "# Firewall NAT\nUse a srcnat masquerade rule for a changing WAN address."
+        ),
+        "https://manual.example/manual-network-setup.md": (
+            "# Assign an IP address\n"
+            "Use /ip/address/add address=192.168.88.1/24 interface=bridge1."
         ),
     }
     pack = load_or_build(
@@ -133,7 +138,27 @@ def test_lexical_retrieval_eval_prefers_exact_topics_then_falls_back(tmp_path: P
         "safe mode rollback": "safe-mode.md",
         "bridge vlan filtering": "bridge-vlan.md",
         "firewall nat masquerade": "firewall-nat.md",
+        "ip/address add": "manual-network-setup.md",
     }
     for query, suffix in expected.items():
         assert pack.search(query)[0].source_url.endswith(suffix)
+        assert pack.search(query, limit=1)[0].source_url.endswith(suffix)
     assert pack.search("missingword masquerade")[0].source_url.endswith("firewall-nat.md")
+
+
+def test_search_deduplicates_repeated_chunks_from_the_same_heading(tmp_path: Path) -> None:
+    index_url = "https://manual.example/llms.txt"
+    pages = {
+        index_url: "- [Long page](long.md)\n",
+        "https://manual.example/long.md": "# RouterOS\n\n" + ("routeros command " * 100),
+    }
+    pack = load_or_build(
+        tmp_path / "deduplicated-rag",
+        index_url=index_url,
+        fetcher=pages.__getitem__,
+        max_chunk_chars=256,
+    )
+
+    hits = pack.search("routeros command", limit=5)
+
+    assert len(hits) == 1
