@@ -11,12 +11,20 @@ because a similarly named backend tool exists.
 | Wi-Fi SSID/password | `manage_wifi_interface` can set SSID/disabled state but exposes no security profile or passphrase. It also lacks the snapshot metadata required by the generic journal workflow. | No Wi-Fi runbook. Do not claim password configuration or rollback safety. |
 | Baseline firewall | `manage_firewall_rule` lacks important match fields such as connection state needed by a defensible opinionated baseline. | READY may propose individual schema-supported firewall, mangle, and address-list changes through the typed approval gateway, but mth does not claim these constitute the complete baseline template from the original plan. |
 | Backup/export in READY | `create_backup` and `export_config` are operational tools, not confirmation-token/journal-bound configuration changes. | Keep them outside the universal READY runbook. HIGH RISK uses its separate pre-flight artifact workflow and retention policy. |
+| Container global config | v1.10 supplies an idempotent singleton schema and `container/config` snapshot. The menu is absent when the RouterOS container package is unavailable. | Expose through the generic typed approval workflow; a live dry-run fails closed on routers without the package. |
+| OpenVPN server | v1.10 supplies an idempotent singleton schema and snapshot without accepting a password. The server menu may be absent on a particular RouterOS installation. | Expose through the generic typed approval workflow; a live dry-run fails closed when the package/server is unavailable. |
 | SSH port/restriction | `manage_ip_service` deliberately excludes port changes to prevent lockout. `run_command` is only a best-effort guarded SSH escape hatch. | Manual operation only; `run_command` remains outside model RBAC. |
 | Wi-Fi validation on CHR | CHR has no physical radio or switch-chip behavior. | Validate Wi-Fi later on isolated physical hardware even after the typed backend gap is closed. |
 
 Closing a row requires reviewing the exact new backend schema, snapshot paths, dry-run behavior,
 idempotency, confirmation flow, and post-check fields. Do not unpin or locally fork MikroMCP only
 to make a runbook appear complete; track an upstream change deliberately.
+
+The v1.10 READY contract also records 28 reviewed exclusions. Control-plane tools, artifact
+operations, reboot/package lifecycle, secret-bearing identities/VPN clients, schemas without
+restorable snapshots, arbitrary code/files, SwOS blobs, raw commands, and router-origin fetches do
+not become READY tools merely because they exist in the live catalog. An unknown write introduced
+by a later backend version remains `uncovered` and makes the contract incomplete until reviewed.
 
 ## Reviewed v1.10 compatibility overlay
 

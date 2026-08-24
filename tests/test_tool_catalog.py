@@ -105,6 +105,7 @@ def test_ready_catalog_exposes_reads_and_only_reviewed_changes_as_proposals() ->
         McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
         McpTool("torch", None, schema, {"readOnlyHint": True}),
         McpTool("manage_container", None, schema, {"readOnlyHint": False}),
+        McpTool("manage_future", None, schema, {"readOnlyHint": False}),
         McpTool("reboot", None, {"type": "object", "properties": {}}, {"readOnlyHint": False}),
         McpTool("apply_plan", None, schema, {"readOnlyHint": False}),
     )
@@ -141,6 +142,7 @@ def test_ready_contract_reports_live_coverage_and_keeps_raw_writes_closed() -> N
         McpTool("manage_bridge_port", None, schema, {"readOnlyHint": False}),
         McpTool("manage_route", None, schema, {"readOnlyHint": False}),
         McpTool("manage_container", None, schema, {"readOnlyHint": False}),
+        McpTool("manage_future", None, schema, {"readOnlyHint": False}),
     )
 
     contract = router.ready_contract(catalog)
@@ -152,7 +154,8 @@ def test_ready_contract_reports_live_coverage_and_keeps_raw_writes_closed() -> N
         "manage_bridge_port",
         "manage_route",
     )
-    assert contract.uncovered_writes == ("manage_container",)
+    assert contract.reviewed_exclusions == ("manage_container",)
+    assert contract.uncovered_writes == ("manage_future",)
     assert contract.missing_runbook_writes == ()
     assert contract.raw_writes_exposed == ()
     assert contract.safe is True
@@ -171,3 +174,15 @@ def test_ready_contract_reports_missing_runbook_dependency() -> None:
 
     assert contract.runbook_writes == ()
     assert contract.missing_runbook_writes == ("manage_bridge_port",)
+
+
+def test_reviewed_exclusion_completes_classification_without_exposing_raw_write() -> None:
+    schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+    contract = ToolCatalogRouter(RunbookRegistry(())).ready_contract(
+        (McpTool("run_command", None, schema, {"readOnlyHint": False}),)
+    )
+
+    assert contract.reviewed_exclusions == ("run_command",)
+    assert contract.uncovered_writes == ()
+    assert contract.raw_writes_exposed == ()
+    assert contract.complete is True

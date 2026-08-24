@@ -9,12 +9,15 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -24,6 +27,7 @@ SCHEMA_VERSION = 1
 PACK_ENV = "MTH_RAG_HOME"
 DEFAULT_MAX_CHUNK_CHARS = 2_400
 DEFAULT_MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
+DOWNLOAD_ATTEMPTS = 4
 
 Fetcher = Callable[[str], bytes | str]
 
@@ -58,32 +62,60 @@ class RagPack:
         words = re.findall(r"[^\W_]+(?:[-./][^\W_]+)*", query, flags=re.UNICODE)
         if not words:
             return ()
-        match = " OR ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+        query_terms = _search_terms(query)
+        terms = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
         database = self.path / str(self.manifest["database"]["path"])
-        with _readonly_connection(database) as connection:
-            rows = connection.execute(
-                """
-                SELECT c.text, c.heading, d.source_url, d.local_path,
-                       bm25(chunks_fts, 4.0, 1.0) AS rank
-                FROM chunks_fts
-                JOIN chunks AS c ON c.id = chunks_fts.rowid
-                JOIN documents AS d ON d.id = c.document_id
-                WHERE chunks_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (match, limit),
-            ).fetchall()
+        try:
+            with _readonly_connection(database) as connection:
+                rows = []
+                for operator in (" AND ", " OR "):
+                    rows = connection.execute(
+                        """
+                        SELECT c.text, c.heading, d.source_url, d.local_path,
+                               bm25(chunks_fts, 4.0, 1.0) AS rank
+                        FROM chunks_fts
+                        JOIN chunks AS c ON c.id = chunks_fts.rowid
+                        JOIN documents AS d ON d.id = c.document_id
+                        WHERE chunks_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        """,
+                        (operator.join(terms), min(100, limit * 8)),
+                    ).fetchall()
+                    if rows:
+                        break
+        except sqlite3.Error as error:
+            raise PackError(f"RAG index search failed: {error}") from error
+        ranked: list[tuple[float, tuple[Any, ...]]] = []
+        for row in rows:
+            heading_terms = _search_terms(str(row[1]))
+            source_terms = _search_terms(str(row[2]))
+            # ponytail: lightweight lexical rerank; add embeddings only if the eval set outgrows
+            # heading/URL disambiguation.
+            score = (
+                -float(row[4])
+                + 4 * len(query_terms.intersection(heading_terms))
+                + 2 * len(query_terms.intersection(source_terms))
+            )
+            ranked.append((score, row))
+        ranked.sort(key=lambda item: item[0], reverse=True)
         return tuple(
             RagHit(
                 text=str(row[0]),
                 heading=str(row[1]),
                 source_url=str(row[2]),
                 source_path=str(row[3]),
-                score=-float(row[4]),
+                score=score,
             )
-            for row in rows
+            for score, row in ranked[:limit]
         )
+
+
+def _search_terms(value: str) -> set[str]:
+    return {
+        word.casefold()
+        for word in re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+    }
 
 
 def resolve_pack_dir(path: str | Path | None = None) -> Path:
@@ -124,8 +156,26 @@ def load_or_build(
 def fetch_url(url: str) -> bytes:
     """Fetch one bounded source using only the standard library."""
     request = Request(url, headers={"User-Agent": "mikrotik-harness-rag/0.1"})
-    with urlopen(request, timeout=30) as response:  # noqa: S310 - caller controls source URL
-        payload = bytes(response.read(DEFAULT_MAX_DOWNLOAD_BYTES + 1))
+    failure: OSError | HTTPException
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with urlopen(  # noqa: S310 - caller controls source URL
+                request, timeout=30
+            ) as response:
+                payload = bytes(response.read(DEFAULT_MAX_DOWNLOAD_BYTES + 1))
+            break
+        except HTTPError as error:
+            if error.code != 429 and error.code < 500:
+                raise PackError(f"HTTP {error.code} while fetching RAG source: {url}") from error
+            failure = error
+        except (OSError, HTTPException) as error:
+            failure = error
+        if attempt + 1 == DOWNLOAD_ATTEMPTS:
+            raise PackError(
+                f"failed to fetch RAG source after {DOWNLOAD_ATTEMPTS} attempts: {url}: "
+                f"{failure}"
+            ) from failure
+        time.sleep(2**attempt)
     if len(payload) > DEFAULT_MAX_DOWNLOAD_BYTES:
         raise PackError(f"RAG source exceeds {DEFAULT_MAX_DOWNLOAD_BYTES} bytes: {url}")
     return payload

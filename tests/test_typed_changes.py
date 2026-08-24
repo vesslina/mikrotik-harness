@@ -80,6 +80,26 @@ def test_typed_proposals_are_domain_scoped_and_dangerous_tools_stay_absent() -> 
     assert "manage_container" not in APPROVED_TYPED_CHANGE_DOMAINS
 
 
+def test_reviewed_v110_singletons_are_available_as_typed_proposals() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "routerId": {"type": "string"},
+            "action": {"type": "string"},
+            "dryRun": {"type": "boolean"},
+        },
+    }
+    catalog = tuple(
+        McpTool(name, "Reviewed singleton", schema, {"readOnlyHint": False})
+        for name in ("manage_container_config", "manage_ovpn_server")
+    )
+
+    assert {tool.name for tool in typed_proposals_for_domains(catalog)} == {
+        "propose_typed_manage_container_config",
+        "propose_typed_manage_ovpn_server",
+    }
+
+
 def test_typed_proposals_require_allowlist_and_reject_secret_schemas() -> None:
     catalog = (
         McpTool(

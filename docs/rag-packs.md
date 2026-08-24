@@ -4,6 +4,8 @@
 the official MikroTik `llms.txt` index, downloads every linked Markdown page, builds a SQLite FTS5
 index beside the sources, writes SHA-256 checksums to `manifest.json`, validates the result, and
 then promotes the completed temporary directory. It never replaces a non-empty directory.
+Transient timeouts, connection drops, HTTP 429, and HTTP 5xx responses receive four bounded
+attempts with a short backoff. A failed all-or-nothing build removes its temporary directory.
 
 If the directory already contains a valid pack, loading and searching perform no network request.
 Copy the complete folder to an offline machine and select it with either:
@@ -39,3 +41,15 @@ SQLite FTS5 is the only retrieval dependency in the first pass. It is part of Py
 build on supported distributions and does not require an LLM, embedding model, Chroma server, or
 background process. Dense embeddings remain an optional future layer if retrieval evaluations
 demonstrate queries that lexical search cannot serve reliably.
+
+## Agent use
+
+HIGH RISK loads an existing valid pack once when the model is selected; it never downloads during
+a chat turn. The local `search_routeros_docs` tool accepts a short English query and returns at most
+five source-linked excerpts. Per-hit and total context limits prevent a copied pack from exhausting
+the model window. Results include the connected RouterOS version but keep applicability explicitly
+unknown: documentation is evidence, not live router state, an instruction, or authority to act.
+
+PLAN and READY do not label this official manual as their operational RAG. Their future RAG1 corpus
+must contain reviewed project conventions and cleaned golden paths; until that corpus exists, the
+typed tool schemas and runbook definitions remain the deterministic READY guidance.

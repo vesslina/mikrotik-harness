@@ -24,6 +24,41 @@ CAPABILITY_DOMAINS = (
     "diagnostics",
 )
 
+# Reviewed v1.10 writes which need a specialised workflow or remain HIGH-RISK-only. New upstream
+# writes stay visible as uncovered until they are deliberately classified here or approval-bound.
+READY_REVIEWED_EXCLUSIONS = frozenset(
+    {
+        "apply_plan",
+        "create_backup",
+        "delete_file",
+        "export_config",
+        "fetch_url",
+        "manage_certificate",
+        "manage_container",
+        "manage_container_env",
+        "manage_container_mount",
+        "manage_interface_list",
+        "manage_interface_list_member",
+        "manage_ipsec_peer",
+        "manage_ipsec_policy",
+        "manage_ovpn_client",
+        "manage_package",
+        "manage_scheduled_job",
+        "manage_script",
+        "manage_upgrade",
+        "manage_user",
+        "manage_user_group",
+        "manage_wifi_interface",
+        "plan_changes",
+        "reboot",
+        "rollback_change",
+        "run_command",
+        "run_script",
+        "upload_file",
+        "write_swos_blob",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilitySelection:
@@ -39,6 +74,7 @@ class ReadyCapabilityContract:
     ready_reads: tuple[str, ...]
     runbook_writes: tuple[str, ...]
     typed_writes: tuple[str, ...]
+    reviewed_exclusions: tuple[str, ...]
     uncovered_writes: tuple[str, ...]
     missing_runbook_writes: tuple[str, ...]
     raw_writes_exposed: tuple[str, ...]
@@ -59,6 +95,7 @@ class ReadyCapabilityContract:
             "ready_reads": list(self.ready_reads),
             "runbook_writes": list(self.runbook_writes),
             "typed_writes": list(self.typed_writes),
+            "reviewed_exclusions": list(self.reviewed_exclusions),
             "uncovered_writes": list(self.uncovered_writes),
             "missing_runbook_writes": list(self.missing_runbook_writes),
             "raw_writes_exposed": list(self.raw_writes_exposed),
@@ -177,6 +214,7 @@ class ToolCatalogRouter:
             name for definition in available_runbooks for name in definition.write_tools
         }
         typed_writes = {tool.name for tool in live if is_approval_bound_change(tool)}
+        reviewed_exclusions = router_writes.intersection(READY_REVIEWED_EXCLUSIONS)
         ready_names = {tool.name for tool in self.ready_tools(live)}
         ready_reads = read_names.intersection(ready_names)
         required_runbook_writes = set(self.registry.write_tools)
@@ -185,8 +223,14 @@ class ToolCatalogRouter:
             ready_reads=tuple(sorted(ready_reads)),
             runbook_writes=tuple(sorted(runbook_writes)),
             typed_writes=tuple(sorted(typed_writes)),
+            reviewed_exclusions=tuple(sorted(reviewed_exclusions)),
             uncovered_writes=tuple(
-                sorted(router_writes - runbook_writes - typed_writes)
+                sorted(
+                    router_writes
+                    - runbook_writes
+                    - typed_writes
+                    - reviewed_exclusions
+                )
             ),
             missing_runbook_writes=tuple(sorted(required_runbook_writes - live_names)),
             raw_writes_exposed=tuple(sorted(router_writes.intersection(ready_names))),

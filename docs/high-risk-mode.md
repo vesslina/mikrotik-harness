@@ -87,7 +87,8 @@ for this operation.
 
 ## RAG status
 
-The portable RouterOS corpus and lexical retrieval foundation are implemented, but retrieved
-evidence is not yet injected into HIGH RISK prompts. Until that integration pass lands, the agent
-must inspect the device and use CLI help when syntax is uncertain. See
+The portable RouterOS corpus and lexical retrieval foundation are integrated through the local
+read-only `search_routeros_docs` agent tool. Retrieved excerpts are bounded, source-linked and
+marked as untrusted reference evidence; they never replace live inspection or verification. If no
+pack is installed or retrieval is inconclusive, the agent uses CLI help. See
 [rag-packs.md](rag-packs.md) and [high-risk-rag-todo.md](high-risk-rag-todo.md).

@@ -122,7 +122,9 @@ The live backend catalog is dynamic and is never hardcoded to a fixed tool count
 presence does not make it a supported READY operation: sensitive, non-rollbackable, or incomplete
 schemas remain outside the supported READY contract until they have a reviewed harness workflow.
 The contract is generated from the live catalog and reports read coverage, reviewed write
-coverage, missing runbook dependencies, uncovered writes, and any accidental raw-write exposure.
+coverage, deliberately excluded writes, missing runbook dependencies, genuinely unreviewed writes,
+and any accidental raw-write exposure. Contract completeness means that every live write has been
+classified; it does not mean that unsafe or operational tools are exposed in READY.
 
 ### HIGH RISK
 
@@ -152,13 +154,15 @@ which reboots the router and causes a short outage.
 
 The HIGH RISK system prompt requires a seven-step cycle: understand, inspect, plan, sanity-check,
 execute, verify, and report. Reasoning is kept in English for token efficiency; user-facing
-conversation and reports are Russian. A portable RouterOS documentation pack can already be built
-and searched locally; injecting retrieved evidence into live prompts remains the next RAG pass.
+conversation and reports are Russian. When a validated portable documentation pack is installed,
+the model also receives a local read-only `search_routeros_docs` tool. It searches with a short
+English query and receives bounded, source-linked excerpts marked as untrusted reference evidence.
 
 ## Portable RAG pack
 
 `mth rag` builds the local RouterOS documentation pack from the official MikroTik Markdown index
-only when its directory is empty. The pack contains the downloaded Markdown, a manifest with
+only when its directory is empty. Transient network failures, HTTP 429, and server errors are
+retried. The pack contains the downloaded Markdown, a manifest with
 SHA-256 checksums, and a SQLite FTS5 index. A populated pack is validated and opened without any
 network request, so the whole directory can be copied to an offline workstation.
 

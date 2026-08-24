@@ -1,15 +1,19 @@
-# HIGH RISK RouterOS CLI RAG — integration TODO
+# HIGH RISK RouterOS CLI RAG — status
 
-The portable Markdown + SQLite FTS5 pack is implemented. This file tracks the remaining live-agent
-integration; RAG is not a hidden dependency of HIGH RISK mode.
+The portable Markdown + SQLite FTS5 pack and live local search tool are implemented. RAG remains
+optional: HIGH RISK has no hidden online, embedding-model, or vector-database dependency.
 
-- Inject only official MikroTik RouterOS documentation and CLI reference pages into HIGH RISK.
-- Keep a separate corpus from future READY-mode operational guidance.
-- Record `ros_major`, topic, relevant commands, source URL, retrieved date and documentation
-  version for each chunk.
-- Retrieve deterministically from task keywords and the RouterOS version known for the connected
-  router; do not claim a retrieved document applies if its version/topic is unknown.
-- Supply retrieved context as evidence, never as a command execution authority. The HIGH RISK
-  seven-step prompt still requires inspection and post-change verification.
-- Add source refresh policy and version-specific retrieval evaluation before enabling it for live
-  agent prompts. Portable/offline validation is already covered by pack tests.
+Implemented:
+
+- official Markdown pages stay separate from future READY operational guidance;
+- the model searches in English through `search_routeros_docs`, which solves Russian task to
+  English corpus retrieval without a translation or embedding model;
+- excerpts have per-hit and total context limits, source URLs, retrieval time, connected RouterOS
+  version and `applicability=unknown`;
+- structured results and the system prompt mark documentation as untrusted evidence;
+- AND-first lexical retrieval falls back to OR only when no exact multi-term result exists.
+
+Remaining only when the source can support it honestly:
+
+- source-provided RouterOS major/document version metadata per page;
+- a refresh policy and a larger version-specific retrieval evaluation set.

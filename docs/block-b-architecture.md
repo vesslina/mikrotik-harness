@@ -2,7 +2,7 @@
 
 ## Current state
 
-Block A is complete and the second major Block B pass is operational. A connected model can read
+Block A is complete and the third major Block B pass is operational. A connected model can read
 live RouterOS state in PLAN, use approval-bound changes in READY, and work through the dedicated
 CLI channel in HIGH RISK. READY has nine deterministic scenario runbooks; the model never receives
 their underlying write tools directly.
@@ -27,16 +27,16 @@ registering another reviewed `RunbookDefinition`; generic capability requires an
 and allowlist entry, not a relaxation of the agent boundary.
 
 READY additionally exposes a runtime typed-change layer for the reviewed MikroMCP write schemas.
-For each selected capability domain, mth intersects the live catalog with the 25-entry reviewed
+For each selected capability domain, mth intersects the live catalog with the 27-entry reviewed
 allowlist, rejects schemas containing credential fields, copies the remaining JSON schema into a
 local `propose_typed_*` tool, removes harness-owned fields, and routes the proposal through the
 same dry-run, confirmation-token, snapshot, journal, verification, history, and rollback
 lifecycle. The underlying `manage_*` tool is never given to the model.
 
-Raw commands, reboot/upgrade, scripts and scheduler payloads, file writes, containers, SwOS blobs,
-and tools containing passwords/private secrets require dedicated workflows with stronger UI and
-verification. A broad approval button is not sufficient authorization for arbitrary code or an
-irreversible operation.
+Raw commands, reboot/upgrade, scripts and scheduler payloads, file writes, container lifecycle,
+SwOS blobs, and tools containing passwords/private secrets require dedicated workflows with
+stronger UI and verification. A broad approval button is not sufficient authorization for
+arbitrary code or an irreversible operation.
 
 ## Dependency and runtime
 
@@ -175,10 +175,10 @@ read again before later changes. `/clear` clears this memory as well as the scre
    baseline firewall match fields, and rollback-bound backup/export.
 2. Add CHR golden tests for successful apply and rollback. PPPoE's active-session case needs a
    local PPPoE server; bridge/NAT/services should use isolated temporary objects.
-3. Connect the portable lexical RAG pack to deterministic READY cards and HIGH RISK evidence
-   retrieval, with RouterOS-version/topic metadata and retrieval evaluations.
+3. Add the project-owned READY operational cards and golden paths. HIGH RISK official-manual
+   evidence retrieval is connected; source-provided version metadata remains unavailable.
 4. Add dense retrieval only if those evaluations show a material lexical-search gap.
 
 The portable pack foundation is implemented with local Markdown, a checksummed manifest, and
-SQLite FTS5. It is intentionally not an authority boundary and is not yet injected into live model
-prompts; see `docs/rag-packs.md`.
+SQLite FTS5. HIGH RISK exposes bounded results through a local read-only search tool; it remains
+evidence rather than an authority boundary. See `docs/rag-packs.md`.

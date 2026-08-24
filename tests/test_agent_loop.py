@@ -31,6 +31,7 @@ from mth.core.runbooks import (
     RunbookStep,
     RunbookVerification,
 )
+from mth.rag import RagHit, load_or_build
 
 
 def _preset() -> ProviderPreset:
@@ -745,3 +746,94 @@ def test_high_risk_executes_raw_mcp_writes_and_persistent_ssh_without_proposal()
         assert any(isinstance(event, ToolResult) for event in events)
 
     asyncio.run(scenario())
+
+
+def test_high_risk_can_search_the_local_routeros_pack(tmp_path) -> None:
+    index_url = "https://manual.example/llms.txt"
+    pages = {
+        index_url: "- [Safe Mode](safe-mode.md)\n",
+        "https://manual.example/safe-mode.md": (
+            "# Safe Mode\n\nSafe Mode rolls configuration changes back when the session drops."
+        ),
+    }
+    pack = load_or_build(
+        tmp_path / "rag",
+        index_url=index_url,
+        fetcher=pages.__getitem__,
+        max_chunk_chars=256,
+    )
+
+    async def scenario() -> None:
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, tools=()):
+                self.calls += 1
+                names = {tool.name for tool in tools}
+                assert "search_routeros_docs" in names
+                if self.calls == 1:
+                    return ProviderReply(
+                        "I will verify the behavior in local documentation.",
+                        (
+                            ProviderToolCall(
+                                "rag-1",
+                                "search_routeros_docs",
+                                {"query": "safe mode rollback", "limit": 2},
+                            ),
+                        ),
+                    )
+                result = json.loads(messages[-1]["content"])
+                assert result["trust"] == "untrusted_reference"
+                assert "session drops" in result["hits"][0]["text"]
+                return ProviderReply("Документация подтверждает поведение Safe Mode.", ())
+
+        class Executor:
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("documentation search must not use SSH")
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=_Backend(),
+            router_id="mikrotik-afe23e",
+            rag_pack=pack,
+            routeros_version="7.21.5",
+        )
+        loop.set_high_risk_executor(Executor())
+
+        events = await loop.run("Проверь поведение Safe Mode", AgentMode.HIGH_RISK)
+
+        rag_results = [
+            event
+            for event in events
+            if isinstance(event, ToolResult) and event.tool_name == "search_routeros_docs"
+        ]
+        assert len(rag_results) == 1
+        assert rag_results[0].is_error is False
+
+    asyncio.run(scenario())
+
+
+def test_routeros_documentation_results_are_context_bounded() -> None:
+    class Pack:
+        manifest = {"created_at": "2026-08-24T00:00:00Z"}
+
+        def search(self, _query: str, *, limit: int = 5):
+            return tuple(
+                RagHit("x" * 5_000, f"Heading {index}", "https://example.test", "page.md", 1.0)
+                for index in range(limit)
+            )
+
+    loop = ReadOnlyAgentLoop(
+        preset=_preset(),
+        provider=_Provider(),
+        backend=_Backend(),
+        router_id="mikrotik-afe23e",
+        rag_pack=Pack(),  # type: ignore[arg-type]
+    )
+
+    result = loop._search_routeros_docs({"query": "routeros", "limit": 5})
+    hits = result.structured_content["hits"]
+
+    assert sum(len(hit["text"]) for hit in hits) <= loop.MAX_RAG_CONTEXT_CHARS

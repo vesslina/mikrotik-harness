@@ -80,6 +80,7 @@ from mth.core.runbooks import (
     TypedChangeDefinition,
     is_approval_bound_change,
 )
+from mth.rag import PackError, RagPack, resolve_pack_dir
 from mth.ui.textual.i18n import (
     THINKING_PHRASES,
     Language,
@@ -2125,12 +2126,21 @@ class ChatScreen(Screen[None]):
             api_key=resolved_key,
         )
         backend = MikroMcpClient(environment=MikroMcpConfigStore().runtime_environment())
+        rag_path = resolve_pack_dir()
+        rag_pack = None
+        try:
+            if rag_path.exists() and any(rag_path.iterdir()):
+                rag_pack = RagPack.load(rag_path)
+        except (OSError, PackError) as error:
+            self._write_system(f"RAG pack disabled: {error}", error=True)
         return ReadOnlyAgentLoop(
             preset=preset,
             provider=provider,
             backend=backend,
             router_id=self.profile.router_id,
             runbooks=self._runbooks,
+            rag_pack=rag_pack,
+            routeros_version=self.profile.version,
         )
 
     def _default_runbook_factory(self, definition: RunbookDefinition) -> RunbookRunner:
