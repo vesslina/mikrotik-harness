@@ -9,6 +9,7 @@ from mth.core.runbooks import (
     DEFAULT_RUNBOOK_REGISTRY,
     RunbookDefinition,
     RunbookRegistry,
+    is_approval_bound_change,
     typed_proposals_for_domains,
 )
 
@@ -28,6 +29,40 @@ CAPABILITY_DOMAINS = (
 class CapabilitySelection:
     domains: tuple[str, ...]
     tools: tuple[McpTool, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReadyCapabilityContract:
+    """Machine-checkable READY coverage derived from the live MCP catalog."""
+
+    plan_reads: tuple[str, ...]
+    ready_reads: tuple[str, ...]
+    runbook_writes: tuple[str, ...]
+    typed_writes: tuple[str, ...]
+    uncovered_writes: tuple[str, ...]
+    missing_runbook_writes: tuple[str, ...]
+    raw_writes_exposed: tuple[str, ...]
+
+    @property
+    def safe(self) -> bool:
+        return not self.raw_writes_exposed
+
+    @property
+    def complete(self) -> bool:
+        return self.safe and not self.uncovered_writes and not self.missing_runbook_writes
+
+    def as_dict(self) -> dict[str, bool | list[str]]:
+        return {
+            "safe": self.safe,
+            "complete": self.complete,
+            "plan_reads": list(self.plan_reads),
+            "ready_reads": list(self.ready_reads),
+            "runbook_writes": list(self.runbook_writes),
+            "typed_writes": list(self.typed_writes),
+            "uncovered_writes": list(self.uncovered_writes),
+            "missing_runbook_writes": list(self.missing_runbook_writes),
+            "raw_writes_exposed": list(self.raw_writes_exposed),
+        }
 
 
 class ToolCatalogRouter:
@@ -121,6 +156,42 @@ class ToolCatalogRouter:
             by_name.setdefault(tool.name, tool)
         return tuple(by_name.values())
 
+    def ready_contract(self, catalog: Sequence[McpTool]) -> ReadyCapabilityContract:
+        """Describe live READY coverage without assuming a backend tool count."""
+
+        live = tuple(catalog)
+        live_names = {tool.name for tool in live}
+        reads = self.filter_read_only(live)
+        read_names = {tool.name for tool in reads}
+        router_writes = {
+            tool.name
+            for tool in live
+            if self._is_router_bound(tool) and tool.name not in read_names
+        }
+        available_runbooks = tuple(
+            definition
+            for definition in self.registry.all()
+            if definition.write_tools.issubset(live_names)
+        )
+        runbook_writes = {
+            name for definition in available_runbooks for name in definition.write_tools
+        }
+        typed_writes = {tool.name for tool in live if is_approval_bound_change(tool)}
+        ready_names = {tool.name for tool in self.ready_tools(live)}
+        ready_reads = read_names.intersection(ready_names)
+        required_runbook_writes = set(self.registry.write_tools)
+        return ReadyCapabilityContract(
+            plan_reads=tuple(sorted(read_names)),
+            ready_reads=tuple(sorted(ready_reads)),
+            runbook_writes=tuple(sorted(runbook_writes)),
+            typed_writes=tuple(sorted(typed_writes)),
+            uncovered_writes=tuple(
+                sorted(router_writes - runbook_writes - typed_writes)
+            ),
+            missing_runbook_writes=tuple(sorted(required_runbook_writes - live_names)),
+            raw_writes_exposed=tuple(sorted(router_writes.intersection(ready_names))),
+        )
+
     def high_risk_tools(self, catalog: Sequence[McpTool]) -> tuple[McpTool, ...]:
         """Expose the complete live catalog plus READY's helpful proposal vocabulary.
 
@@ -176,17 +247,20 @@ class ToolCatalogRouter:
 
     @classmethod
     def is_router_bound_read_tool(cls, tool: McpTool) -> bool:
-        properties = tool.input_schema.get("properties")
-        router_bound = isinstance(properties, dict) and "routerId" in properties
         obvious_write = tool.name in cls.READ_ONLY_FORBIDDEN_EXACT or tool.name.startswith(
             cls.READ_ONLY_FORBIDDEN_PREFIXES
         )
         return (
-            router_bound
+            cls._is_router_bound(tool)
             and not obvious_write
             and tool.annotations.get("readOnlyHint") is True
             and tool.annotations.get("destructiveHint") is not True
         )
+
+    @staticmethod
+    def _is_router_bound(tool: McpTool) -> bool:
+        properties = tool.input_schema.get("properties")
+        return isinstance(properties, dict) and "routerId" in properties
 
     @staticmethod
     def _normalize_domains(raw: Any) -> tuple[str, ...]:

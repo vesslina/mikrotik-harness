@@ -87,6 +87,7 @@ for this operation.
 
 ## RAG status
 
-The separate RouterOS CLI RAG corpus is intentionally **not implemented yet**. The agent prompt
-states this honestly and tells the model to inspect the device and use CLI help when syntax is
-uncertain. See [high-risk-rag-todo.md](high-risk-rag-todo.md) for the next milestone.
+The portable RouterOS corpus and lexical retrieval foundation are implemented, but retrieved
+evidence is not yet injected into HIGH RISK prompts. Until that integration pass lands, the agent
+must inspect the device and use CLI help when syntax is uncertain. See
+[rag-packs.md](rag-packs.md) and [high-risk-rag-todo.md](high-risk-rag-todo.md).

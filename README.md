@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11 or newer">
   <img src="https://img.shields.io/badge/node-22%2B-339933.svg" alt="Node.js 22 or newer">
   <img src="https://img.shields.io/badge/RouterOS-7.x-293845.svg" alt="RouterOS 7.x">
-  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.9.0-6f42c1.svg" alt="MikroMCP v1.9.0">
+  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.10.0-6f42c1.svg" alt="MikroMCP v1.10.0">
   <img src="https://img.shields.io/badge/UI-Textual%208.x-5B3CC4.svg" alt="Textual 8.x">
 </p>
 
@@ -37,11 +37,11 @@ The project is built around three boundaries:
 - RouterOS 7.x with HTTPS REST enabled through `www-ssl`
 - A local model endpoint (LM Studio, Ollama, or `ai.local`) or another OpenAI-compatible endpoint
 
-MikroMCP is included as a pinned git submodule at `v1.9.0`. The harness uses the official Python
+MikroMCP is included as a pinned git submodule at `v1.10.0`. The harness uses the official Python
 MCP SDK over stdio and starts the Node.js backend as a child process. The upstream submodule is
-not modified. At runtime, `mth` creates an ignored compatibility bundle for RouterOS singleton
-updates such as `/ip/dns` and refuses to start if the pinned bundle no longer matches the reviewed
-overlay.
+not modified. At runtime, `mth` creates an ignored compatibility bundle which filters two extra
+RouterOS runtime fields from rollback snapshots and refuses to start if the reviewed insertion
+point changes.
 
 ## Development setup
 
@@ -121,6 +121,8 @@ receives a short Russian completion report after a verified apply.
 The live backend catalog is dynamic and is never hardcoded to a fixed tool count. A backend tool's
 presence does not make it a supported READY operation: sensitive, non-rollbackable, or incomplete
 schemas remain outside the supported READY contract until they have a reviewed harness workflow.
+The contract is generated from the live catalog and reports read coverage, reviewed write
+coverage, missing runbook dependencies, uncovered writes, and any accidental raw-write exposure.
 
 ### HIGH RISK
 
@@ -150,8 +152,27 @@ which reboots the router and causes a short outage.
 
 The HIGH RISK system prompt requires a seven-step cycle: understand, inspect, plan, sanity-check,
 execute, verify, and report. Reasoning is kept in English for token efficiency; user-facing
-conversation and reports are Russian. The dedicated RouterOS CLI RAG corpus is intentionally
-deferred and is tracked in [high-risk-rag-todo.md](docs/high-risk-rag-todo.md).
+conversation and reports are Russian. A portable RouterOS documentation pack can already be built
+and searched locally; injecting retrieved evidence into live prompts remains the next RAG pass.
+
+## Portable RAG pack
+
+`mth rag` builds the local RouterOS documentation pack from the official MikroTik Markdown index
+only when its directory is empty. The pack contains the downloaded Markdown, a manifest with
+SHA-256 checksums, and a SQLite FTS5 index. A populated pack is validated and opened without any
+network request, so the whole directory can be copied to an offline workstation.
+
+```powershell
+mth rag
+mth rag --query "safe mode rollback"
+mth rag --rag-dir E:\routeros-rag --query "bridge vlan filtering" --json
+```
+
+The default location is `.mth/rag`; `MTH_RAG_HOME` or `--rag-dir` selects another portable folder.
+The project does not redistribute MikroTik's corpus. Each operator builds a local pack from the
+official source or copies an already validated pack under the applicable documentation terms.
+Dense embeddings and Chroma are not required: the first implementation uses Python's built-in
+SQLite FTS5 and therefore needs no second model. See [rag-packs.md](docs/rag-packs.md).
 
 ## Models and chat
 

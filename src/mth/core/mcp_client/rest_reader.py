@@ -1,6 +1,6 @@
 """Narrow, read-only RouterOS REST extension for gaps in pinned MikroMCP.
 
-MikroMCP 1.9 has a typed ``manage_ip_address`` change tool but does not expose a
+MikroMCP 1.10 has a typed ``manage_ip_address`` change tool but does not expose a
 corresponding list tool.  The harness keeps writes inside MikroMCP; this module
 only supplies that missing inspection primitive and verifies the same TOFU TLS
 fingerprint stored during registration before every request.

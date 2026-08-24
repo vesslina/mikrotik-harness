@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from mth import cli
 from mth.core.discovery.models import DeviceInfo, DiscoveryResult
@@ -54,3 +55,25 @@ def test_cli_launches_tui_by_default(monkeypatch) -> None:
         "port": 5678,
         "active": True,
     }
+
+
+def test_cli_rag_reuses_existing_pack_without_network(monkeypatch, tmp_path: Path, capsys) -> None:
+    from mth.rag import load_or_build
+
+    index = "https://manual.example/llms.txt"
+    pages = {
+        index: "- [DNS](dns.md)\n",
+        "https://manual.example/dns.md": "# DNS\n\nConfigure recursive DNS carefully.",
+    }
+    pack = tmp_path / "portable-rag"
+    load_or_build(pack, index_url=index, fetcher=pages.__getitem__)
+
+    def no_network(_url: str) -> bytes:
+        raise AssertionError("existing pack must load offline")
+
+    monkeypatch.setattr("mth.rag.pack.fetch_url", no_network)
+
+    assert cli.main(["rag", "--rag-dir", str(pack), "--query", "recursive", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["document_count"] == 1
+    assert output["hits"][0]["heading"] == "DNS"

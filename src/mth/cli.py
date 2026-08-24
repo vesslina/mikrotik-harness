@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from mth import __version__
 from mth.core.discovery import DiscoveryError, DiscoveryErrorCode, discover_devices
@@ -19,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("tui", "discover"),
+        choices=("tui", "discover", "rag"),
         default="tui",
         help="interface to run (default: tui)",
     )
@@ -48,6 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not send an active four-byte MNDP probe",
     )
     parser.add_argument("--json", action="store_true", dest="as_json", help="emit JSON")
+    parser.add_argument(
+        "--rag-dir",
+        type=Path,
+        help="portable RAG pack directory (default: MTH_RAG_HOME or .mth/rag)",
+    )
+    parser.add_argument(
+        "--index-url",
+        default="https://manual.mikrotik.com/llms.txt",
+        help="Markdown index used only when building an empty RAG pack",
+    )
+    parser.add_argument("--query", help="search the RAG pack after loading it")
+    parser.add_argument("--limit", type=int, default=5, help="maximum RAG search results")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -90,6 +103,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             active=not args.listen_only,
         )
 
+    if args.command == "rag":
+        return run_rag(
+            path=args.rag_dir,
+            index_url=args.index_url,
+            query=args.query,
+            limit=args.limit,
+            as_json=args.as_json,
+        )
+
     try:
         result = discover_devices(
             timeout=args.timeout,
@@ -126,6 +148,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
         print("\nMNDP fields are untrusted until the connection step verifies the device.")
+    return 0
+
+
+def run_rag(
+    *,
+    path: Path | None,
+    index_url: str,
+    query: str | None,
+    limit: int,
+    as_json: bool,
+) -> int:
+    """Load a copied pack offline, or build it once when its directory is empty."""
+
+    from mth.rag import PackError, load_or_build
+
+    try:
+        pack = load_or_build(path, index_url=index_url)
+        hits = pack.search(query, limit=limit) if query else ()
+    except (OSError, PackError, ValueError) as error:
+        if as_json:
+            print(json.dumps({"error": str(error)}, ensure_ascii=False))
+        else:
+            print(f"RAG_ERROR: {error}", file=sys.stderr)
+        return 4
+
+    payload = {
+        "path": str(pack.path),
+        "source": pack.manifest["source"],
+        "document_count": pack.manifest["document_count"],
+        "chunk_count": pack.manifest["chunk_count"],
+        "hits": [
+            {
+                "text": hit.text,
+                "heading": hit.heading,
+                "source_url": hit.source_url,
+                "source_path": hit.source_path,
+                "score": hit.score,
+            }
+            for hit in hits
+        ],
+    }
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"RAG pack: {pack.path} · {payload['document_count']} documents · "
+            f"{payload['chunk_count']} chunks"
+        )
+        for hit in hits:
+            print(f"\n[{hit.heading or hit.source_path}] {hit.source_url}\n{hit.text}")
     return 0
 
 

@@ -13,22 +13,12 @@ class RuntimeUnavailableError(RuntimeError):
     """Raised when the pinned MikroMCP runtime has not been built."""
 
 
-_UPDATE_METHOD = '''  async update(path, id, data) {
-    await this.doRequest("PATCH", `${this.baseUrl}/${path}/${id}`, data);
-  }'''
-_SINGLETON_SAFE_UPDATE_METHOD = '''  async update(path, id, data) {
-    if (id) {
-      await this.doRequest("PATCH", `${this.baseUrl}/${path}/${id}`, data);
-    } else {
-      await this.doRequest("POST", `${this.baseUrl}/${path}/set`, data);
-    }
-  }'''
-_SINGLETON_MARKER = '`${this.baseUrl}/${path}/set`'
-_SNAPSHOT_RUNTIME_MARKER = '  "uptime"\n]);'
-_SNAPSHOT_RUNTIME_FIELDS = '''  "uptime",
+_SNAPSHOT_RUNTIME_MARKER = '''  "tx-packet",
+  "uptime",'''
+_SNAPSHOT_RUNTIME_FIELDS = '''  "tx-packet",
+  "uptime",
   "actual-interface",
-  "slave"
-]);'''
+  "slave",'''
 
 
 def project_root() -> Path:
@@ -64,35 +54,21 @@ class MikroMcpRuntime:
         self._prepare_entrypoint()
 
     def _prepare_entrypoint(self) -> None:
-        """Patch v1.9's ID-less RouterOS singleton update in an ignored copy.
-
-        MikroMCP v1.9 sends ``PATCH path/undefined`` for singleton menus such as
-        ``/ip/dns`` because those records have no ``.id``. RouterOS exposes their
-        setters as ``POST path/set``. The pinned submodule stays untouched: mth
-        runs a deterministic copy of its built bundle and fails closed if the
-        expected upstream code changes.
-        """
+        """Add two RouterOS runtime fields missing from MikroMCP's snapshot filter."""
 
         source = self.source_entrypoint.read_text(encoding="utf-8")
-        if _SINGLETON_MARKER in source:
+        if _SNAPSHOT_RUNTIME_FIELDS in source:
             patched = source
-        elif _UPDATE_METHOD in source:
+        elif _SNAPSHOT_RUNTIME_MARKER in source:
             patched = source.replace(
-                _UPDATE_METHOD,
-                _SINGLETON_SAFE_UPDATE_METHOD,
+                _SNAPSHOT_RUNTIME_MARKER,
+                _SNAPSHOT_RUNTIME_FIELDS,
                 1,
             )
         else:
             raise RuntimeUnavailableError(
-                "Pinned MikroMCP bundle has an unknown REST update implementation; "
-                "refusing to apply the mth singleton compatibility overlay."
-            )
-
-        if _SNAPSHOT_RUNTIME_FIELDS not in patched and _SNAPSHOT_RUNTIME_MARKER in patched:
-            patched = patched.replace(
-                _SNAPSHOT_RUNTIME_MARKER,
-                _SNAPSHOT_RUNTIME_FIELDS,
-                1,
+                "Pinned MikroMCP bundle has an unknown snapshot runtime-field list; "
+                "refusing to apply the mth compatibility overlay."
             )
 
         target = self.entrypoint

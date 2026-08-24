@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11 или новее">
   <img src="https://img.shields.io/badge/node-22%2B-339933.svg" alt="Node.js 22 или новее">
   <img src="https://img.shields.io/badge/RouterOS-7.x-293845.svg" alt="RouterOS 7.x">
-  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.9.0-6f42c1.svg" alt="MikroMCP v1.9.0">
+  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.10.0-6f42c1.svg" alt="MikroMCP v1.10.0">
   <img src="https://img.shields.io/badge/UI-Textual%208.x-5B3CC4.svg" alt="Textual 8.x">
 </p>
 
@@ -36,10 +36,10 @@ discovery, доверием к устройству, интеграцией мо
 - RouterOS 7.x с HTTPS REST через `www-ssl`
 - LM Studio, Ollama, `ai.local` или другой OpenAI-compatible endpoint
 
-MikroMCP подключён как git submodule на `v1.9.0`. Harness использует официальный Python MCP
+MikroMCP подключён как git submodule на `v1.10.0`. Harness использует официальный Python MCP
 SDK через stdio и запускает Node.js backend дочерним процессом. Исходники submodule не изменяются;
-для RouterOS singleton-методов вроде `/ip/dns` создаётся игнорируемая compatibility-копия
-bundle с fail-closed проверкой.
+игнорируемая compatibility-копия bundle лишь добавляет два RouterOS runtime-поля в фильтр
+rollback snapshot и создаётся с fail-closed проверкой точки вставки.
 
 ```powershell
 python -m venv .venv
@@ -107,6 +107,8 @@ proposal → typed form → baseline → dry-run → human approval
 Каталог MikroMCP динамический и не считается фиксированным числом. Само наличие backend tool не
 делает его поддержанным READY-сценарием: чувствительные, неоткатываемые или неполные схемы
 остаются за границей поддержанного контракта до появления reviewed workflow.
+Контракт строится из живого каталога и показывает покрытие read/write, отсутствующие зависимости
+runbook-ов, непокрытые write-tools и случайное попадание raw write-tools в READY.
 
 ### HIGH RISK
 
@@ -135,8 +137,27 @@ RouterOS application keepalive AsyncSSH отключён; живость опр�
 
 Системный prompt HIGH RISK требует семь шагов: понять запрос, изучить состояние, спланировать,
 быстро проверить план, выполнить, проверить результат и отчитаться. Reasoning идёт на английском,
-общение с пользователем — на русском. RouterOS CLI RAG пока отложен:
-[high-risk-rag-todo.md](docs/high-risk-rag-todo.md).
+общение с пользователем — на русском. Переносимый пакет документации RouterOS уже можно собрать и
+искать локально; передача найденных фрагментов в живой prompt остаётся следующим проходом RAG.
+
+## Переносимый RAG pack
+
+`mth rag` скачивает официальный Markdown-корпус MikroTik только если папка pack-а пуста. Внутри
+остаются исходные Markdown-файлы, manifest с SHA-256 и локальный индекс SQLite FTS5. Заполненная
+папка сначала проверяется, затем открывается без единого сетевого запроса: её можно перенести на
+объект с флешки.
+
+```powershell
+mth rag
+mth rag --query "safe mode rollback"
+mth rag --rag-dir E:\routeros-rag --query "bridge vlan filtering" --json
+```
+
+По умолчанию используется `.mth/rag`; путь меняется через `MTH_RAG_HOME` или `--rag-dir`. Проект
+не распространяет корпус MikroTik: пользователь собирает локальную копию из официального источника
+или переносит уже проверенную папку с соблюдением условий документации. Chroma и embedding-модель
+не обязательны — первый вариант использует встроенный SQLite FTS5. Подробнее:
+[rag-packs.md](docs/rag-packs.md).
 
 ## Модели и команды
 

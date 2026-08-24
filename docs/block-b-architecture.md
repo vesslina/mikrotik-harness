@@ -40,8 +40,8 @@ irreversible operation.
 
 ## Dependency and runtime
 
-- Backend: `external/mikromcp`, git submodule pinned at tag `v1.9.0` (commit
-  `955cd99e9125b76d9ccc3f3c2f009a33de479a52`).
+- Backend: `external/mikromcp`, git submodule pinned at tag `v1.10.0` (commit
+  `aeee411fdf5acf4ae736800eb781d9b57b7660bb`).
 - Client: official Python `mcp` package over stdio.
 - Private configuration and execution history: `.mth/`; never committed.
 - The initialized server's `tools/list` response is the runtime source of truth. The 122-tool
@@ -85,6 +85,11 @@ catalog-routing helper for focused flows; it is not the authority boundary:
 The harness filters the live catalog to router-bound tools whose annotations say
 `readOnlyHint=true` and not destructive. The current CHR catalog contains 63 router-scoped read
 tools plus one harness-owned address reader; the live count is never hardcoded.
+
+`ToolCatalogRouter.ready_contract()` derives the machine-checkable boundary from that same live
+catalog. It records PLAN/READY reads, scenario and typed writes, missing runbook dependencies,
+uncovered backend writes, and accidental raw-write exposure. Tests can therefore fail closed on
+drift without turning a historical tool count into policy.
 
 Every real call is rebound to the connected `routerId`. Fleet-global tools, management tools,
 `apply_plan`, and `run_command` never reach the model. Device output is treated as untrusted data
@@ -170,10 +175,10 @@ read again before later changes. `/clear` clears this memory as well as the scre
    baseline firewall match fields, and rollback-bound backup/export.
 2. Add CHR golden tests for successful apply and rollback. PPPoE's active-session case needs a
    local PPPoE server; bridge/NAT/services should use isolated temporary objects.
-3. Add optional provider streaming without changing normalized events or safety boundaries.
-4. Add deterministic runbook-selected RAG after the operational catalog is complete. The first
-   curated model-evaluation scripts already live in `docs/model-evaluation-prompts-ru.md`.
+3. Connect the portable lexical RAG pack to deterministic READY cards and HIGH RISK evidence
+   retrieval, with RouterOS-version/topic metadata and retrieval evaluations.
+4. Add dense retrieval only if those evaluations show a material lexical-search gap.
 
-RAG remains deliberately deferred: typed live state and deterministic runbooks deliver more
-operational value now, while documentation retrieval can be added later without reopening the
-write boundary.
+The portable pack foundation is implemented with local Markdown, a checksummed manifest, and
+SQLite FTS5. It is intentionally not an authority boundary and is not yet injected into live model
+prompts; see `docs/rag-packs.md`.

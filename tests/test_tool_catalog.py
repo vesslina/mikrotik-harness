@@ -1,5 +1,6 @@
 from mth.agent.tool_catalog import CAPABILITY_DOMAINS, ToolCatalogRouter
 from mth.core.mcp_client import McpTool
+from mth.core.runbooks import LanBridgeDefinition, RunbookRegistry
 
 
 def _tool(name: str) -> McpTool:
@@ -129,3 +130,44 @@ def test_high_risk_catalog_keeps_raw_tools_and_adds_persistent_ssh() -> None:
 
     assert {"list_interfaces", "manage_ip_address", "run_command", "ssh_exec"} <= names
     assert "propose_typed_manage_ip_address" in names
+
+
+def test_ready_contract_reports_live_coverage_and_keeps_raw_writes_closed() -> None:
+    router = ToolCatalogRouter(RunbookRegistry((LanBridgeDefinition(),)))
+    schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+    catalog = (
+        McpTool("list_interfaces", None, schema, {"readOnlyHint": True}),
+        McpTool("manage_bridge", None, schema, {"readOnlyHint": False}),
+        McpTool("manage_bridge_port", None, schema, {"readOnlyHint": False}),
+        McpTool("manage_route", None, schema, {"readOnlyHint": False}),
+        McpTool("manage_container", None, schema, {"readOnlyHint": False}),
+    )
+
+    contract = router.ready_contract(catalog)
+
+    assert contract.plan_reads == contract.ready_reads == ("list_interfaces",)
+    assert contract.runbook_writes == ("manage_bridge", "manage_bridge_port")
+    assert contract.typed_writes == (
+        "manage_bridge",
+        "manage_bridge_port",
+        "manage_route",
+    )
+    assert contract.uncovered_writes == ("manage_container",)
+    assert contract.missing_runbook_writes == ()
+    assert contract.raw_writes_exposed == ()
+    assert contract.safe is True
+    assert contract.complete is False
+    assert contract.as_dict()["safe"] is True
+
+
+def test_ready_contract_reports_missing_runbook_dependency() -> None:
+    router = ToolCatalogRouter(RunbookRegistry((LanBridgeDefinition(),)))
+    schema = {"type": "object", "properties": {"routerId": {"type": "string"}}}
+    catalog = (
+        McpTool("manage_bridge", None, schema, {"readOnlyHint": False}),
+    )
+
+    contract = router.ready_contract(catalog)
+
+    assert contract.runbook_writes == ()
+    assert contract.missing_runbook_writes == ("manage_bridge_port",)
