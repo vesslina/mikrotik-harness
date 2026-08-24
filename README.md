@@ -5,192 +5,164 @@
 </p>
 
 <p align="center">
-  A keyboard-first LLM harness for inspecting and operating MikroTik RouterOS.
+  A keyboard-first RouterOS workspace for LLM agents.
 </p>
 
 <p align="center">
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-e05d44.svg" alt="version 0.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6.svg" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6.svg" alt="Windows 10 or 11">
+  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB.svg" alt="Python 3.11 or 3.12">
   <img src="https://img.shields.io/badge/node-22%2B-339933.svg" alt="Node.js 22 or newer">
   <img src="https://img.shields.io/badge/RouterOS-7.x-293845.svg" alt="RouterOS 7.x">
-  <img src="https://img.shields.io/badge/MCP-MikroMCP%20v1.10.0-6f42c1.svg" alt="MikroMCP v1.10.0">
-  <img src="https://img.shields.io/badge/UI-Textual%208.x-5B3CC4.svg" alt="Textual 8.x">
+  <img src="https://img.shields.io/badge/backend-MikroMCP%20v1.10.0-6f42c1.svg" alt="MikroMCP v1.10.0">
 </p>
 
 [Русская версия](README_RU.md)
 
-`mth` discovers MikroTik devices, registers a selected router through MikroMCP, and provides a
-provider-neutral agent loop for inspecting and changing the connected device.
+MikroTik Harness (`mth`) is a community CLI project that gives an LLM agent a practical,
+mode-controlled workspace for MikroTik RouterOS. It discovers a router, connects a model, exposes
+the appropriate tools, records the session, and keeps the operator in control of changes.
 
-The project is built around three boundaries:
+The typed RouterOS backend comes from
+[MikroMCP](https://github.com/AliKarami/MikroMCP) ([official site](https://mikromcp.com/)).
+`mth` runs the pinned backend locally and adds discovery, model providers, permissions, approvals,
+session history, offline RouterOS reference search, and a persistent HIGH RISK SSH channel.
 
-- MikroMCP is the typed RouterOS backend and the source of the live MCP tool catalog.
-- `mth` owns discovery, trust, model integration, mode policy, runbooks, approvals, history,
-  and the terminal UI.
-- The LLM never chooses a router and never receives more authority than the active mode allows.
+> [!WARNING]
+> This is not an official MikroTik product. Test changes on a lab device first. HIGH RISK can make
+> any change the connected RouterOS user is allowed to make.
+
+## What it does
+
+- Discovers MikroTik devices over MNDP or connects to a manually entered address.
+- Works with LM Studio, Ollama, and arbitrary OpenAI-compatible chat-completions endpoints.
+- Gives the model different RouterOS authority in PLAN, READY, and HIGH RISK modes.
+- Uses the live MikroMCP catalog instead of assuming a fixed tool count.
+- Shows tool calls, reasoning, approvals, verification, and the final report in one terminal UI.
+- Stores model presets and chat sessions locally; provider secrets use the Windows user vault.
+- Searches a portable local copy of the official RouterOS manual without an embedding model.
+- Creates a pre-flight backup and enters RouterOS Safe Mode before HIGH RISK is unlocked.
+
+## Agent modes
+
+Press `Tab` to cycle between modes.
+
+| Mode | Agent access | Intended use |
+| --- | --- | --- |
+| **PLAN** | Live read-only MikroMCP tools | Inventory, diagnostics, and planning without changes |
+| **READY** | Read tools plus reviewed proposal/runbook workflows | Normal changes with preview, approval, apply, and verification |
+| **HIGH RISK** | READY tools, the live MikroMCP catalog, and persistent RouterOS CLI over SSH | Open-ended engineering when a reviewed workflow is not enough |
+
+READY does not hand every raw write call directly to the model. A supported proposal is checked
+against live state, shown to the operator, approved, applied through MikroMCP, and verified.
+
+HIGH RISK deliberately removes that restriction. Before it opens, `mth` pins the SSH host key,
+creates and downloads a binary backup plus text export, verifies both artifacts, opens one
+persistent AsyncSSH PTY, and confirms RouterOS Safe Mode. The same channel is kept for every
+`ssh_exec` call so CLI context and Safe Mode survive between commands. Leaving the mode requires
+an explicit commit or Safe Mode rollback decision. `/rollback` performs a separately confirmed
+full backup restore and reboots the router.
 
 ## Requirements
 
-- Python 3.11+
-- Node.js 22+
-- RouterOS 7.x with HTTPS REST enabled through `www-ssl`
-- A local model endpoint (LM Studio, Ollama, or `ai.local`) or another OpenAI-compatible endpoint
+Current source installation requires:
 
-MikroMCP is included as a pinned git submodule at `v1.10.0`. The harness uses the official Python
-MCP SDK over stdio and starts the Node.js backend as a child process. The upstream submodule is
-not modified. At runtime, `mth` creates an ignored compatibility bundle which filters two extra
-RouterOS runtime fields from rollback snapshots and refuses to start if the reviewed insertion
-point changes.
+- 64-bit Windows 10 or Windows 11;
+- CPython 3.11 or 3.12;
+- Node.js 22 or newer and npm;
+- Git for the source checkout and MikroMCP submodule;
+- RouterOS 7.x with HTTPS REST (`www-ssl`); SSH is also required for HIGH RISK;
+- an LLM endpoint: LM Studio, Ollama, or another OpenAI-compatible provider.
 
-## Development setup
+PowerShell 7, Visual Studio, C++ Build Tools, and a separate Microsoft VC++ Redistributable are not
+source-install requirements when pip installs the published binary wheels. Windows PowerShell 5.1
+is sufficient for the setup commands below.
+
+## Install from source on Windows
+
+Clone recursively: a plain `git clone` does **not** populate the MikroMCP submodule.
 
 ```powershell
-python -m venv .venv
-git submodule update --init
+git clone --recurse-submodules https://github.com/vesslina/mikrotik-harness.git
+cd mikrotik-harness
+
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 npm --prefix external/mikromcp ci
 npm --prefix external/mikromcp run build
-.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-Run the application with:
+Start it directly:
 
 ```powershell
+.\.venv\Scripts\mth.exe
+```
+
+Or activate the virtual environment first; then `mth` works as a normal command:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
 mth
 ```
 
-The private runtime state is stored below `.mth/` and is ignored by Git. This includes MikroMCP
-registration, pinned trust records, encrypted provider secrets, runbook history, and HIGH RISK
-recovery artifacts.
+For an existing non-recursive checkout, run:
 
-## Discovery and registration
+```powershell
+git submodule update --init --recursive
+```
 
-The Discovery screen listens for MNDP replies and presents the device MAC, addresses, identity,
-RouterOS version, and board. A device can also be entered manually. The selected address, login,
-and password are used to register the router with MikroMCP.
+## Prepare RouterOS once
 
-Registration verifies the HTTPS REST service, captures the TLS certificate fingerprint, writes the
-MikroMCP `routers.yaml`/identity environment, fetches the live `tools/list` catalog, and confirms
-`check_router_health` plus `get_system_status`. A later TLS fingerprint mismatch is a hard stop.
-
-RouterOS REST is served by `www-ssl`, not `api-ssl`. A development CHR can be prepared with:
+MikroMCP uses RouterOS HTTPS REST through `www-ssl`; `api-ssl` is a different service. Replace both
+instances of `<ROUTER_IP>` with the router's stable management address before pasting these commands:
 
 ```routeros
 /certificate add name=mth-ca common-name=mth-ca key-usage=key-cert-sign,crl-sign
 /certificate sign mth-ca
-/certificate add name=mth-https common-name=192.168.56.103 subject-alt-name=IP:192.168.56.103 key-usage=tls-server
+/certificate add name=mth-https common-name=<ROUTER_IP> subject-alt-name=IP:<ROUTER_IP> key-usage=tls-server
 /certificate sign mth-https ca=mth-ca
 /ip service set www-ssl port=443 certificate=mth-https disabled=no
+/ip service set ssh disabled=no
 ```
 
-Use the router's stable management address and a dedicated non-empty RouterOS password.
+Use a RouterOS account with a non-empty password and only the permissions required for your work.
+The first connection displays the TLS fingerprint. HIGH RISK separately displays and pins the SSH
+host-key fingerprint. A later fingerprint mismatch is a hard stop, not a warning to ignore.
 
-## Agent modes
+## First session
 
-`Tab` cycles through `PLAN`, `READY`, and `HIGH RISK`.
+1. Run `mth` and select the router in Discovery, or enter its management address manually.
+2. Enter the RouterOS login and password and approve the first TLS fingerprint after verifying it.
+3. Run `/model`, choose **Local model** or **OpenAI-compatible provider**, and save a preset.
+4. Ask the agent to inspect the device in PLAN. Press `Tab` only when the requested authority is
+   appropriate.
 
-### PLAN
+For Ollama, start `ollama serve`, pull a model with tool-call support, and use
+`http://127.0.0.1:11434/v1`. For LM Studio, enable its local OpenAI-compatible server and use the URL
+shown by LM Studio. Ollama and LM Studio themselves are not bundled with `mth`.
 
-PLAN is a read-only reconnaissance mode. The harness fetches the live MikroMCP catalog and gives
-the model only router-bound tools marked read-only. The model may inspect RouterOS state and
-explain it, but it cannot propose or execute a change.
+## Offline RouterOS manual
 
-### READY
-
-READY is the normal change-management mode. The model receives the complete live read-only
-catalog plus harness-owned proposal tools:
-
-- nine reviewed scenario runbooks for PPPoE, bridges, IP addresses, address lists, DHCP core,
-  DNS, NAT, administrative services, and WireGuard;
-- typed proposals for the reviewed MikroMCP write schemas supported by the current harness
-  workflow.
-
-The underlying MikroMCP write tools are not passed directly to the model. Every proposal follows
-the same lifecycle:
-
-```text
-proposal → typed form → live baseline → dry-run → human approval
-→ MikroMCP confirmation → apply → post-check → journal/history
-→ separately approved rollback when required
-```
-
-Secrets are collected by masked harness forms and injected only while assembling the approved
-backend call. Plans, transcript events, model context, and history remain secret-free. The model
-receives a short Russian completion report after a verified apply.
-
-The live backend catalog is dynamic and is never hardcoded to a fixed tool count. A backend tool's
-presence does not make it a supported READY operation: sensitive, non-rollbackable, or incomplete
-schemas remain outside the supported READY contract until they have a reviewed harness workflow.
-The contract is generated from the live catalog and reports read coverage, reviewed write
-coverage, deliberately excluded writes, missing runbook dependencies, genuinely unreviewed writes,
-and any accidental raw-write exposure. Contract completeness means that every live write has been
-classified; it does not mean that unsafe or operational tools are exposed in READY.
-
-### HIGH RISK
-
-HIGH RISK is an explicit elevated mode for open-ended RouterOS work. It keeps all READY tools and
-adds the live MikroMCP catalog, direct write tools, and `ssh_exec` for one-line RouterOS CLI
-commands. Direct tools have no per-command approval gate: the harness owns MikroMCP's confirmation
-token handshake after the operator's elevation decision. Optional `propose_*` previews still open
-the normal reviewed workflow when explicitly selected.
-
-Before the composer is unlocked, the harness:
-
-1. performs independent SSH host-key trust-on-first-use and rejects later mismatches;
-2. asks MikroMCP to create a password-protected binary backup and a text export;
-3. downloads both artifacts over SFTP on the same pinned SSH connection, verifies them, and stores
-   them with a manifest under `.mth/high-risk-backups/<router-id>/`;
-4. opens one persistent AsyncSSH PTY, negotiates the RouterOS terminal, and confirms `<SAFE>`
-   Safe Mode.
-
-Every CLI command is framed with a unique RouterOS marker, has bounded output and timeout handling,
-and uses the same PTY so menu context and Safe Mode survive across calls. The RouterOS-compatible
-transport keeps AsyncSSH application keepalives disabled; TCP, command framing, and explicit
-session state provide the liveness boundary without closing a healthy RouterOS channel.
-
-Leaving HIGH RISK requires an explicit choice to commit and exit, abort and roll back through Safe
-Mode, or keep the session open. The harness never sends `/quit` while that decision is unresolved.
-`/rollback` in HIGH RISK is reserved for a separately confirmed full pre-flight `.backup` restore,
-which reboots the router and causes a short outage.
-
-The HIGH RISK system prompt requires a seven-step cycle: understand, inspect, plan, sanity-check,
-execute, verify, and report. Reasoning is kept in English for token efficiency; user-facing
-conversation and reports are Russian. When a validated portable documentation pack is installed,
-the model also receives a local read-only `search_routeros_docs` tool. It searches with a short
-English RouterOS menu-path query and receives bounded excerpts marked as untrusted reference
-evidence. Their source URLs are also shown directly in the transcript.
-
-## Portable RAG pack
-
-`mth rag` builds the local RouterOS documentation pack from the official MikroTik Markdown index
-only when its directory is empty. Transient network failures, HTTP 429, and server errors are
-retried. The pack contains the downloaded Markdown, a manifest with
-SHA-256 checksums, and a SQLite FTS5 index. A populated pack is validated and opened without any
-network request, so the whole directory can be copied to an offline workstation.
+Build the documentation pack once on a connected workstation:
 
 ```powershell
 mth rag
 mth rag --query "safe mode rollback"
-mth rag --rag-dir E:\routeros-rag --query "bridge vlan filtering" --json
 ```
 
-The default location is `.mth/rag`; `MTH_RAG_HOME` or `--rag-dir` selects another portable folder.
-The project does not redistribute MikroTik's corpus. Each operator builds a local pack from the
-official source or copies an already validated pack under the applicable documentation terms.
-Dense embeddings and Chroma are not required: the first implementation uses Python's built-in
-SQLite FTS5 and therefore needs no second model. See [rag-packs.md](docs/rag-packs.md).
+The default pack is `.mth/rag`. Copy that complete directory to the same location on an offline
+machine, or point `MTH_RAG_HOME` at it. A populated pack is checksum-validated and opened without a
+network request. Search uses the standard-library SQLite FTS5 index, so it needs neither Chroma nor
+an embedding model. URLs displayed beside results are source attribution stored in the local index;
+the agent does not open them.
 
-## Models and chat
+Project-owned field recipes live in [`docs/field-recipes`](docs/field-recipes). Adding a Markdown
+card there makes it available to `search_field_recipes` without downloading anything.
 
-`/model` saves named presets for local models or arbitrary OpenAI-compatible endpoints. Provider
-metadata is stored separately from API credentials. Credentials use the Windows user-protected
-vault when available, with an encrypted Fernet fallback; environment-variable references remain
-supported. `/models` selects or deletes saved presets.
-
-The chat supports Russian/English UI selection, bounded in-process conversation memory, model
-warm-up, streamed OpenAI-compatible responses with a toggleable thinking panel, normalized
-reasoning/tool events, inline approval forms, session history, transcript copying, and command
-hints after `/`.
+The MikroTik documentation corpus is not redistributed by this public repository. Build it from
+the official source or transfer your own validated copy under the applicable documentation terms.
 
 ## Commands
 
@@ -217,21 +189,40 @@ mth discover --json
 mth discover --broadcast 192.168.56.255
 ```
 
-## Checks
+## Local data
+
+Private state is stored below `.mth/` and ignored by Git: router registration, pinned trust
+records, encrypted provider secrets, runbook history, chat sessions, HIGH RISK recovery artifacts,
+and the optional manual pack. Do not publish this directory.
+
+## Offline field deployment
+
+Copying a development virtual environment to another PC is not supported: Windows venv launchers
+contain machine-specific paths. The 1.0 release target is a per-user offline bundle containing a
+private CPython runtime, private Node.js runtime, prebuilt MikroMCP, a Python wheelhouse, and an
+optional operator-supplied RAG pack. The target laptop will need no Git, npm, global Python/Node,
+administrator rights, or internet connection.
+
+The frozen bundle layout, install flow, dependency inventory, and clean-machine acceptance matrix
+are documented in [Windows offline distribution](docs/windows-offline-distribution.md). Until that
+bundle passes the Python 3.11 and 3.12 clean-machine matrix, source installation above is the only
+supported installation method.
+
+## Development checks
 
 ```powershell
-pytest
-ruff check .
-mypy src
-python -m mth --help
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\mypy.exe src
+.\.venv\Scripts\python.exe -m mth --help
 ```
 
-The backend boundary and known MikroMCP gaps are documented in
-[`docs/backend-capability-gaps.md`](docs/backend-capability-gaps.md). The current Block B
-architecture is in [`docs/block-b-architecture.md`](docs/block-b-architecture.md), and the
-three-level live model prompts are in
-[`docs/model-evaluation-prompts-ru.md`](docs/model-evaluation-prompts-ru.md).
+Architecture and safety details are in
+[`docs/block-b-architecture.md`](docs/block-b-architecture.md),
+[`docs/high-risk-mode.md`](docs/high-risk-mode.md), and
+[`docs/rag-packs.md`](docs/rag-packs.md).
 
 ## License
 
-MikroTik Harness is released under the [MIT License](LICENSE).
+MikroTik Harness is released under the [MIT License](LICENSE). MikroMCP and third-party components
+retain their own licenses.

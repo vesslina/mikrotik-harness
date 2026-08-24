@@ -31,7 +31,7 @@ from mth.core.runbooks import (
     RunbookStep,
     RunbookVerification,
 )
-from mth.rag import RagHit, load_or_build
+from mth.rag import FieldPack, RagHit, load_or_build
 
 
 def _preset() -> ProviderPreset:
@@ -1010,3 +1010,74 @@ def test_routeros_documentation_results_are_context_bounded() -> None:
     hits = result.structured_content["hits"]
 
     assert sum(len(hit["text"]) for hit in hits) <= loop.MAX_RAG_CONTEXT_CHARS
+
+
+def test_high_risk_exposes_local_field_recipe_collection(tmp_path) -> None:
+    recipe_dir = tmp_path / "field-recipes"
+    recipe_dir.mkdir()
+    (recipe_dir / "recipe.md").write_text(
+        """---
+kind: field_recipe
+collection: rag2b_field
+id: cpe
+device_models: [SXTsq Lite5]
+---
+# CPE
+Use the reviewed CPE path.
+""",
+        encoding="utf-8",
+    )
+
+    class Backend:
+        async def list_tools(self) -> tuple[McpTool, ...]:
+            return (
+                McpTool(
+                    "list_interfaces",
+                    "Read interfaces",
+                    {"type": "object", "properties": {}},
+                    {"readOnlyHint": True, "destructiveHint": False},
+                ),
+            )
+
+    class Executor:
+        async def execute(self, *_args, **_kwargs) -> McpToolResult:
+            return McpToolResult(("ok",), {"status": "ok"}, False)
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, _messages, tools=()) -> ProviderReply:
+            self.calls += 1
+            assert "search_field_recipes" in {tool.name for tool in tools}
+            if self.calls == 1:
+                return ProviderReply(
+                    "Сначала загружу профиль.",
+                    (
+                        ProviderToolCall(
+                            "select-1",
+                            "select_router_capabilities",
+                            {"domains": ["interfaces"]},
+                        ),
+                    ),
+                )
+            assert any(
+                "SXTsq Lite5" in str(message.get("content"))
+                for message in _messages
+                if message.get("role") == "tool"
+            )
+            return ProviderReply("Карточка доступна локально.", ())
+
+    loop = ReadOnlyAgentLoop(
+        preset=_preset(),
+        provider=Provider(),
+        backend=Backend(),
+        router_id="mikrotik-afe23e",
+        field_pack=FieldPack.load(recipe_dir),
+        device_model="SXTsq Lite5",
+    )
+    loop.set_high_risk_executor(Executor())
+
+    events = asyncio.run(loop.run("Настрой SXTsq Lite5 CPE", AgentMode.HIGH_RISK))
+
+    assert any(isinstance(event, FinalSummary) for event in events)

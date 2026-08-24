@@ -12,8 +12,12 @@ Implemented:
   version and `applicability=unknown`;
 - structured results and the system prompt mark documentation as untrusted evidence;
 - AND-first lexical retrieval falls back to OR only when no exact multi-term result exists.
+- a separate local field-recipe collection loads Markdown dropped into `docs/field-recipes/` and
+  exposes only the read-only `search_field_recipes` tool in HIGH RISK;
+- field recipes are filtered by the connected board when available and are never fetched over HTTP.
 
 Remaining only when the source can support it honestly:
 
 - source-provided RouterOS major/document version metadata per page;
-- a refresh policy and a larger version-specific retrieval evaluation set.
+- a refresh policy and a larger version-specific retrieval evaluation set;
+- diagnostics/internet golden paths and additional reviewed field cards.

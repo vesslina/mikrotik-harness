@@ -81,7 +81,7 @@ from mth.core.runbooks import (
     TypedChangeDefinition,
     is_approval_bound_change,
 )
-from mth.rag import PackError, RagPack, resolve_pack_dir
+from mth.rag import FieldPack, PackError, RagPack, resolve_field_pack_dir, resolve_pack_dir
 from mth.ui.textual.i18n import (
     THINKING_PHRASES,
     Language,
@@ -360,7 +360,7 @@ class ModelWizardScreen(ModalScreen[ModelSelection | None]):
                 yield Label("Provider", classes="field-label")
                 yield Select(
                     (
-                        ("Local model — LM Studio / Ollama / ai.local", ProviderKind.LM_STUDIO),
+                        ("Local model — LM Studio / Ollama", ProviderKind.LM_STUDIO),
                         ("OpenAI-compatible provider", ProviderKind.OPENAI_COMPATIBLE),
                     ),
                     value=ProviderKind.LM_STUDIO,
@@ -953,7 +953,7 @@ class ChatScreen(Screen[None]):
                     yield Label("Provider", id="inline-provider-label", classes="inline-label")
                     yield Select(
                         (
-                            ("Local model — LM Studio / Ollama / ai.local", ProviderKind.LM_STUDIO),
+                            ("Local model — LM Studio / Ollama", ProviderKind.LM_STUDIO),
                             ("OpenAI-compatible provider", ProviderKind.OPENAI_COMPATIBLE),
                         ),
                         value=ProviderKind.LM_STUDIO,
@@ -2134,6 +2134,13 @@ class ChatScreen(Screen[None]):
                 rag_pack = RagPack.load(rag_path)
         except (OSError, PackError) as error:
             self._write_system(f"RAG pack disabled: {error}", error=True)
+        field_pack = FieldPack.load(resolve_field_pack_dir())
+        if field_pack.invalid_files:
+            self._write_system(
+                "Field recipe collection skipped invalid files: "
+                + ", ".join(field_pack.invalid_files),
+                error=True,
+            )
         return ReadOnlyAgentLoop(
             preset=preset,
             provider=provider,
@@ -2141,7 +2148,9 @@ class ChatScreen(Screen[None]):
             router_id=self.profile.router_id,
             runbooks=self._runbooks,
             rag_pack=rag_pack,
+            field_pack=field_pack if field_pack.recipes else None,
             routeros_version=self.profile.version,
+            device_model=self.profile.board,
         )
 
     def _default_runbook_factory(self, definition: RunbookDefinition) -> RunbookRunner:

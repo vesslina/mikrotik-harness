@@ -177,8 +177,9 @@ read again before later changes. `/clear` clears this memory as well as the scre
    baseline firewall match fields, and rollback-bound backup/export.
 2. Add CHR golden tests for successful apply and rollback. PPPoE's active-session case needs a
    local PPPoE server; bridge/NAT/services should use isolated temporary objects.
-3. Add the project-owned READY operational cards and golden paths. HIGH RISK official-manual
-   evidence retrieval is connected; source-provided version metadata remains unavailable.
+3. Add diagnostics/internet golden paths and additional reviewed field cards. The separate local
+   RAG 2B collection and deterministic field-card injection after capability selection are now
+   connected; source-provided RouterOS version metadata remains unavailable.
 4. Add dense retrieval only if those evaluations show a material lexical-search gap.
 
 The portable pack foundation is implemented with local Markdown, a checksummed manifest, and

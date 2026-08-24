@@ -3,7 +3,11 @@ import sys
 import pytest
 
 from mth.core.mcp_client.client import unwrap_exception_group
-from mth.core.mcp_client.runtime import MikroMcpRuntime, RuntimeUnavailableError
+from mth.core.mcp_client.runtime import (
+    MikroMcpRuntime,
+    RuntimeUnavailableError,
+    project_root,
+)
 
 UPSTREAM_BUNDLE = '''#!/usr/bin/env node
 const RUNTIME_FIELDS = new Set([
@@ -13,6 +17,12 @@ const RUNTIME_FIELDS = new Set([
   "dynamic-servers"
 ]);
 '''
+
+
+def test_project_root_can_be_set_by_installed_bundle(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MTH_PROJECT_ROOT", str(tmp_path))
+
+    assert project_root() == tmp_path.resolve()
 
 
 def test_runtime_adds_snapshot_fields_without_touching_upstream(tmp_path) -> None:

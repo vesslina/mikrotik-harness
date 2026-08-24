@@ -19,9 +19,13 @@ _SNAPSHOT_RUNTIME_FIELDS = '''  "tx-packet",
   "uptime",
   "actual-interface",
   "slave",'''
+_PROJECT_ROOT_ENV = "MTH_PROJECT_ROOT"
 
 
 def project_root() -> Path:
+    configured = os.environ.get(_PROJECT_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parents[4]
 
 

@@ -53,3 +53,17 @@ unknown: documentation is evidence, not live router state, an instruction, or au
 PLAN and READY do not label this official manual as their operational RAG. Their future RAG1 corpus
 must contain reviewed project conventions and cleaned golden paths; until that corpus exists, the
 typed tool schemas and runbook definitions remain the deterministic READY guidance.
+
+## Project field recipes (RAG 2B)
+
+Reviewed, device-specific operational cards live in `docs/field-recipes/` as ordinary Markdown
+files. A card is picked up automatically on the next chat start when its YAML front matter has
+`kind: field_recipe`, `collection: rag2b_field`, an `id`, and `device_models`. Copying a new card
+into that folder is the whole installation step; no server or network fetch is involved. Set
+`MTH_FIELD_RAG_HOME` to use another local/offline folder.
+
+HIGH RISK exposes the read-only `search_field_recipes` tool when at least one valid card is
+present. The loader filters by the connected board when it is known, reports malformed files, and
+marks card text as untrusted project evidence. Cards never authorize a change, contain secrets, or
+replace live RouterOS verification. The initial collection contains the SXTsq Lite5 subscriber-CPE
+profile; additional diagnostics and field profiles are separate follow-up work.

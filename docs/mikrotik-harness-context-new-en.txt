@@ -24,7 +24,7 @@ The project's execution backend is **MikroMCP** (github.com/AliKarami/MikroMCP, 
 
 **Test environment:** primarily a virtual RouterOS (**CHR — Cloud Hosted Router**); physical hardware is used once the first runbooks exist and for final validation (CHR won't show real Wi-Fi behavior, the actual switch chip, or hardware offload). MikroMCP's own project includes a CHR-based integration test harness that can be reused for validating MikroMCP itself, separately from our own runbook-level tests.
 
-**Models:** local (LM Studio/Ollama: Qwen, Gemma) or via API (OpenRouter, third-party OpenAI-compatible providers — including a locally-hosted model on a phone via apps like ai.local, which from the harness's point of view is just another OpenAI-compatible endpoint). The backend is model-agnostic through an explicit capability matrix (Section 3.9), not a bare assumption that "OpenAI-compatible" implies uniform behavior.
+**Models:** local (LM Studio/Ollama: Qwen, Gemma) or via API (OpenRouter and other OpenAI-compatible providers). The backend is model-agnostic through an explicit capability matrix (Section 3.9), not a bare assumption that "OpenAI-compatible" implies uniform behavior.
 
 ---
 
@@ -153,7 +153,7 @@ Two documented limits to design around, not assume away: rollback does not resto
 - **`/model`** — a three-branch wizard:
   1. *Local*: checks whether an LM Studio backend is already running (starts it if not), queries the list of loaded models, the user picks one.
   2. *OpenRouter*: the URL is hardcoded; the user enters only an API key and model name.
-  3. *Custom OpenAI-compatible provider*: URL, API key, and model name entered manually — this also covers a locally-hosted model reached over the LAN (e.g. a phone running ai.local), since from the harness's point of view it's just another endpoint.
+  3. *Custom OpenAI-compatible provider*: URL, API key, and model name entered manually — this also covers a locally-hosted model reached over the LAN, since from the harness's point of view it's just another endpoint.
   Each configured combination is saved as a **preset** (name → provider/URL/model); the API key itself is never stored in the preset file in plaintext — it's read from an environment variable or a system keyring at runtime. Presets are selected quickly via `/models`.
 - **Warm-up**: after model selection, a short test prompt ("are you there?"), sent with thinking mode explicitly disabled (the disabling mechanism is per-provider — an API parameter for some, a prompt suffix for others, not universally controllable through OpenRouter), hidden from the user. Measures response speed (t/s) in the background. On failure, the specific cause is shown, not a generic error: no internet / no connection to the provider / invalid URL / invalid API key / invalid model name.
 
