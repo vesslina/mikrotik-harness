@@ -37,6 +37,19 @@ URLs and retrieval time for attribution and refresh decisions. A checksum mismat
 unsupported schema, or path escaping the pack directory is a hard failure; mth does not silently
 redownload over a damaged portable copy.
 
+For a release corpus, publish an external sidecar next to the pack (for example
+`routeros-rag.sha256`) containing the SHA-256 of `manifest.json` in standard form:
+
+```text
+<64 lowercase hex characters>  manifest.json
+```
+
+The manifest then authenticates the database, index, and every source file. `mth` verifies the
+sidecar automatically when `<rag-directory>.sha256` exists, or when `MTH_RAG_CHECKSUM` /
+`--checksum` points to it. Generate one on the trusted build machine with
+`mth.rag.write_external_checksum`; do not generate or replace a release sidecar on the target
+machine.
+
 SQLite FTS5 is the only retrieval dependency in the first pass. It is part of Python's SQLite
 build on supported distributions and does not require an LLM, embedding model, Chroma server, or
 background process. Dense embeddings remain an optional future layer if retrieval evaluations

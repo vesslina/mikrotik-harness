@@ -163,6 +163,10 @@ mth rag --query "safe mode rollback"
 embedding-модель не нужны. URL рядом с результатами — сохранённая локально ссылка на источник;
 агент её не открывает.
 
+Для release-пакета храните внешний sidecar `<rag-directory>.sha256` рядом с папкой (или задайте
+`MTH_RAG_CHECKSUM`). Он закрепляет `manifest.json`, а manifest — базу, индекс и исходные страницы.
+Проверку можно указать явно: `mth rag --checksum <sidecar>`.
+
 Проектные полевые рецепты лежат в [`docs/field-recipes`](docs/field-recipes). Новая Markdown-карточка
 в этой папке становится доступна через `search_field_recipes` без скачивания.
 

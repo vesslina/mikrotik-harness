@@ -35,16 +35,6 @@ from mth.core.runbooks.history import (
     RunbookHistoryPaths,
     RunbookHistoryStore,
 )
-from mth.core.runbooks.pppoe import (
-    PppoeApplyResult,
-    PppoePlan,
-    PppoeRequest,
-    PppoeRollbackPreview,
-    PppoeRollbackResult,
-    PppoeRunbookError,
-    PppoeRunbookExecutor,
-    PppoeSecret,
-)
 from mth.core.runbooks.typed import (
     APPROVED_TYPED_CHANGE_DOMAINS,
     TypedChangeDefinition,
@@ -63,14 +53,6 @@ __all__ = [
     "DnsResolverDefinition",
     "LanBridgeDefinition",
     "IpAddressDefinition",
-    "PppoeApplyResult",
-    "PppoePlan",
-    "PppoeRequest",
-    "PppoeRollbackPreview",
-    "PppoeRollbackResult",
-    "PppoeRunbookError",
-    "PppoeRunbookExecutor",
-    "PppoeSecret",
     "RunbookApplyResult",
     "RunbookBackend",
     "RunbookDefinition",

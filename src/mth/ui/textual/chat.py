@@ -21,7 +21,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.message import Message
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.selection import Selection
 from textual.strip import Strip
 from textual.timer import Timer
@@ -146,6 +146,10 @@ LOCAL_CONTEXT_TOKENS = 60_000
 REMOTE_CONTEXT_TOKENS = 200_000
 SAFE_MODE_ACTION_WARNING = 80
 SAFE_MODE_ACTION_CRITICAL = 90
+MODEL_DEFAULT_URLS = {
+    ProviderKind.LM_STUDIO: "http://127.0.0.1:1234/v1",
+    ProviderKind.OPENAI_COMPATIBLE: "",
+}
 
 
 def _context_default(provider: ProviderKind) -> int:
@@ -321,370 +325,6 @@ class PixelLogo(Static):
         output.append_text(self._shadowed_word("HARNESS", "#ff3b30", "#681d1d"))
         output.append("\n", style="on #090909")
         return output
-
-
-class ModelWizardScreen(ModalScreen[ModelSelection | None]):
-    DEFAULT_URLS = {
-        ProviderKind.LM_STUDIO: "http://127.0.0.1:1234/v1",
-        ProviderKind.OPENAI_COMPATIBLE: "",
-    }
-
-    CSS = """
-    ModelWizardScreen { align: center middle; }
-    #model-dialog {
-        width: 84;
-        height: auto;
-        max-height: 36;
-        padding: 1 2;
-        border: round #ff3b30;
-        background: #111315;
-    }
-    #model-dialog .model-row { height: 3; }
-    #model-dialog .model-option { height: 3; padding-left: 22; }
-    #model-dialog .field-label {
-        width: 22;
-        height: 3;
-        content-align: left middle;
-        color: #aeb4ba;
-    }
-    #model-dialog Input, #provider-kind { width: 1fr; }
-    #model-error { height: auto; min-height: 1; margin-top: 1; color: #ff6b62; }
-    #model-actions { height: auto; margin-top: 1; align-horizontal: right; }
-    #model-actions Button { margin-left: 1; }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="model-dialog"):
-            yield Static("Select model provider", classes="dialog-title")
-            with Horizontal(classes="model-row"):
-                yield Label("Provider", classes="field-label")
-                yield Select(
-                    (
-                        ("Local model — LM Studio / Ollama", ProviderKind.LM_STUDIO),
-                        ("OpenAI-compatible provider", ProviderKind.OPENAI_COMPATIBLE),
-                    ),
-                    value=ProviderKind.LM_STUDIO,
-                    allow_blank=False,
-                    id="provider-kind",
-                )
-            with Horizontal(classes="model-row"):
-                yield Label("Preset name", classes="field-label")
-                yield Input(value="local", id="preset-name")
-            with Horizontal(classes="model-row"):
-                yield Label("Base URL", classes="field-label")
-                yield Input(
-                    value=self.DEFAULT_URLS[ProviderKind.LM_STUDIO],
-                    id="provider-url",
-                )
-            with Horizontal(classes="model-row"):
-                yield Label("Model", classes="field-label")
-                yield Input(
-                    placeholder="provider/model-name (OpenAI-format tools required)",
-                    id="model-name",
-                )
-            with Horizontal(classes="model-row"):
-                yield Label("API key (encrypted)", classes="field-label")
-                yield Input(
-                    password=True,
-                    placeholder="saved per preset; optional for local providers",
-                    id="api-key",
-                )
-            with Horizontal(classes="model-row"):
-                yield Label("API-key env variable", classes="field-label")
-                yield Input(placeholder="PROVIDER_API_KEY", id="api-key-env")
-            with Horizontal(classes="model-row"):
-                yield Label("Max context tokens", classes="field-label")
-                yield Input(value=str(LOCAL_CONTEXT_TOKENS), id="context-tokens", type="integer")
-            with Horizontal(classes="model-option"):
-                yield Checkbox(
-                    "Expose secrets to this LLM (loopback endpoints only)",
-                    value=False,
-                    id="allow-sensitive-tool-data",
-                )
-            yield Static("", id="model-error", markup=False)
-            with Horizontal(id="model-actions"):
-                yield Button("Cancel", id="cancel-model")
-                yield Button("Use model", id="save-model", variant="primary")
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "provider-kind" or not isinstance(event.value, ProviderKind):
-            return
-        self.query_one("#provider-url", Input).value = self.DEFAULT_URLS.get(event.value, "")
-        default_name = {
-            ProviderKind.LM_STUDIO: "local",
-            ProviderKind.OPENAI_COMPATIBLE: "custom",
-        }[event.value]
-        self.query_one("#preset-name", Input).value = default_name
-        self.query_one("#context-tokens", Input).value = str(_context_default(event.value))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel-model":
-            self.dismiss(None)
-            return
-        if event.button.id != "save-model":
-            return
-        self._save()
-
-    def _save(self) -> None:
-        provider = self.query_one("#provider-kind", Select).value
-        if not isinstance(provider, ProviderKind):
-            self._error("Select a provider.")
-            return
-        try:
-            context_tokens = int(self.query_one("#context-tokens", Input).value)
-            preset = ProviderPreset(
-                name=self.query_one("#preset-name", Input).value.strip(),
-                provider=provider,
-                base_url=self.query_one("#provider-url", Input).value.strip(),
-                model=self.query_one("#model-name", Input).value.strip(),
-                api_key_env=self.query_one("#api-key-env", Input).value.strip() or None,
-                allow_sensitive_tool_data=self.query_one(
-                    "#allow-sensitive-tool-data", Checkbox
-                ).value,
-                capabilities=ModelCapabilities(
-                    supports_tools=True,
-                    supports_streaming=True,
-                    supports_reasoning=False,
-                    supports_json_schema=False,
-                    max_context_tokens=context_tokens,
-                    reasoning_control=ReasoningControl.NONE,
-                    tool_call_format=ToolCallFormat.OPENAI,
-                ),
-            )
-            preset.require_agent_loop_support()
-        except (TypeError, ValueError) as error:
-            self._error(str(error))
-            return
-        api_key = self.query_one("#api-key", Input).value or None
-        self.dismiss(ModelSelection(preset=preset, api_key=api_key))
-
-    def _error(self, message: str) -> None:
-        self.query_one("#model-error", Static).update(message)
-
-
-class ModelPickerScreen(ModalScreen[ModelPickerResult | None]):
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
-
-    CSS = """
-    ModelPickerScreen { align: center middle; }
-    #model-picker-dialog {
-        width: 88;
-        height: auto;
-        max-height: 24;
-        padding: 1 2;
-        border: round #ff3b30;
-        background: #111315;
-    }
-    #model-picker-title { height: 2; color: white; text-style: bold; }
-    #saved-model-list {
-        height: auto;
-        max-height: 14;
-        border: solid #40464d;
-        background: #090909;
-    }
-    #model-picker-help { height: 2; padding-top: 1; color: #8b949e; }
-    #model-picker-actions { height: auto; margin-top: 1; align-horizontal: right; }
-    #model-picker-actions Button { margin-left: 1; }
-    """
-
-    def __init__(
-        self,
-        presets: tuple[ProviderPreset, ...],
-        selected_name: str | None,
-    ) -> None:
-        super().__init__()
-        self._presets = presets
-        self._selected_name = selected_name
-
-    def compose(self) -> ComposeResult:
-        options = [
-            Option(
-                f"{preset.name}  ·  {_provider_label(preset.provider)}  ·  {preset.model}\n"
-                f"    {preset.base_url}"
-            )
-            for preset in self._presets
-        ]
-        with Vertical(id="model-picker-dialog"):
-            yield Static("Saved models", id="model-picker-title")
-            yield KeyboardPickerList(*options, id="saved-model-list", markup=False)
-            yield Static(
-                "↑/↓ choose  ·  Enter or double-click activate  ·  Del delete  ·  Esc cancel",
-                id="model-picker-help",
-            )
-
-    def on_mount(self) -> None:
-        option_list = self.query_one("#saved-model-list", OptionList)
-        selected_index = next(
-            (
-                index
-                for index, preset in enumerate(self._presets)
-                if preset.name == self._selected_name
-            ),
-            0,
-        )
-        option_list.highlighted = selected_index
-        option_list.focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(ModelPickerResult(self._presets[event.option_index]))
-
-    def on_keyboard_picker_list_delete_pressed(
-        self, event: KeyboardPickerList.DeletePressed
-    ) -> None:
-        if event.option_list.id != "saved-model-list":
-            return
-        index = event.option_list.highlighted
-        if index is not None and 0 <= index < len(self._presets):
-            self.dismiss(ModelPickerResult(self._presets[index], delete=True))
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class RunbookWizardScreen(ModalScreen[RunbookSelection | None]):
-    CSS = """
-    RunbookWizardScreen, PppoeWizardScreen { align: center middle; }
-    #runbook-dialog {
-        width: 78;
-        height: auto;
-        max-height: 38;
-        padding: 1 2;
-        border: round #ff3b30;
-        background: #111315;
-    }
-    #runbook-dialog .runbook-row { height: 3; }
-    #runbook-dialog .field-label { width: 24; content-align: left middle; color: #aeb4ba; }
-    #runbook-dialog Input { width: 1fr; }
-    #runbook-error { height: auto; min-height: 1; color: #ff6b62; }
-    #runbook-actions { height: auto; margin-top: 1; align-horizontal: right; }
-    #runbook-actions Button { margin-left: 1; }
-    """
-
-    def __init__(
-        self,
-        definition: RunbookDefinition,
-        proposal: RunbookProposal | None = None,
-    ) -> None:
-        super().__init__()
-        self.definition = definition
-        self._proposal = proposal
-
-    @staticmethod
-    def field_id(name: str) -> str:
-        return "runbook-field-" + "".join(
-            character.lower() if character.isalnum() else "-" for character in name
-        )
-
-    def _initial(self, name: str, default: object) -> object:
-        if self._proposal is not None and name in self._proposal.parameters:
-            return self._proposal.parameters[name]
-        return default
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="runbook-dialog"):
-            yield Static(f"{self.definition.title} runbook", classes="dialog-title")
-            yield Static(
-                (
-                    "The LLM proposed editable values; no change has been made. "
-                    "Secret fields stay masked and are never sent to the LLM."
-                    if self._proposal is not None
-                    else "Review every value before building the live dry-run plan."
-                ),
-                markup=False,
-            )
-            for spec in self.definition.fields:
-                initial = self._initial(spec.name, spec.default)
-                with Horizontal(classes="runbook-row"):
-                    yield Label(spec.label, classes="field-label")
-                    if spec.kind is RunbookFieldKind.BOOLEAN:
-                        yield Checkbox(
-                            spec.description or spec.label,
-                            value=initial if isinstance(initial, bool) else False,
-                            id=self.field_id(spec.name),
-                        )
-                    else:
-                        if isinstance(initial, (list, tuple)):
-                            value = ", ".join(str(item) for item in initial)
-                        else:
-                            value = initial if isinstance(initial, str) else ""
-                        yield Input(
-                            value=value,
-                            password=spec.kind is RunbookFieldKind.SECRET,
-                            placeholder=spec.placeholder,
-                            id=self.field_id(spec.name),
-                        )
-            yield Static("", id="runbook-error", markup=False)
-            with Horizontal(id="runbook-actions"):
-                yield Button("Cancel", id="cancel-runbook")
-                yield Button("Build dry-run plan", id="plan-runbook", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel-runbook":
-            self.dismiss(None)
-            return
-        if event.button.id != "plan-runbook":
-            return
-        raw: dict[str, object] = {}
-        for spec in self.definition.fields:
-            selector = f"#{self.field_id(spec.name)}"
-            if spec.kind is RunbookFieldKind.BOOLEAN:
-                raw[spec.name] = self.query_one(selector, Checkbox).value
-            else:
-                raw[spec.name] = self.query_one(selector, Input).value
-        try:
-            submission = self.definition.parse_submission(raw)
-        except ValueError as error:
-            self.query_one("#runbook-error", Static).update(str(error))
-            return
-        self.dismiss(RunbookSelection(submission))
-
-
-class PppoeWizardScreen(RunbookWizardScreen):
-    """Compatibility name for integrations that opened the original PPPoE modal."""
-
-    def __init__(self, proposal: RunbookProposal | None = None) -> None:
-        super().__init__(DEFAULT_RUNBOOK_REGISTRY.get("wan_pppoe"), proposal)
-
-
-class ApprovalScreen(ModalScreen[bool]):
-    CSS = """
-    ApprovalScreen { align: center middle; }
-    #approval-dialog {
-        width: 82;
-        height: auto;
-        max-height: 28;
-        padding: 1 2;
-        border: double #ffb454;
-        background: #111315;
-    }
-    #approval-title { height: 2; color: #ffb454; text-style: bold; }
-    #approval-summary { height: auto; max-height: 18; color: white; }
-    #approval-actions { height: auto; margin-top: 1; align-horizontal: right; }
-    #approval-actions Button { margin-left: 1; }
-    """
-
-    def __init__(
-        self,
-        summary: str,
-        *,
-        title: str = "Approve RouterOS change",
-        action_label: str = "Apply approved plan",
-    ) -> None:
-        super().__init__()
-        self._summary = summary
-        self._title = title
-        self._action_label = action_label
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="approval-dialog"):
-            yield Static(self._title, id="approval-title")
-            yield Static(self._summary, id="approval-summary", markup=False)
-            with Horizontal(id="approval-actions"):
-                yield Button("Cancel", id="cancel-approval")
-                yield Button(self._action_label, id="approve-plan", variant="warning")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "approve-plan")
 
 
 class ChatScreen(Screen[None]):
@@ -965,7 +605,7 @@ class ChatScreen(Screen[None]):
                     (
                         "Base URL",
                         "inline-provider-url",
-                        ModelWizardScreen.DEFAULT_URLS[ProviderKind.LM_STUDIO],
+                        MODEL_DEFAULT_URLS[ProviderKind.LM_STUDIO],
                         "",
                         False,
                     ),
@@ -1079,7 +719,7 @@ class ChatScreen(Screen[None]):
         ):
             return
         self.query_one("#inline-provider-url", Input).value = (
-            ModelWizardScreen.DEFAULT_URLS.get(event.value, "")
+            MODEL_DEFAULT_URLS.get(event.value, "")
         )
         self.query_one("#inline-preset-name", Input).value = {
             ProviderKind.LM_STUDIO: "local",

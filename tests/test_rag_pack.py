@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mth.rag import PackError, RagPack, load_or_build
+from mth.rag import PackError, RagPack, load_or_build, write_external_checksum
 from mth.rag.pack import _index_pages, fetch_url
 
 INDEX_URL = "https://manual.example/llms.txt"
@@ -75,6 +75,38 @@ def test_corrupt_non_empty_pack_is_rejected_without_rebuild(tmp_path: Path) -> N
     with pytest.raises(PackError, match="checksum mismatch"):
         load_or_build(pack_path, index_url=INDEX_URL, fetcher=fetch)
     assert called is False
+
+
+def test_external_manifest_checksum_is_verified_before_pack_load(tmp_path: Path) -> None:
+    pack_path = tmp_path / "routeros-rag"
+    load_or_build(pack_path, index_url=INDEX_URL, fetcher=PAGES.__getitem__)
+    checksum_path = write_external_checksum(pack_path, tmp_path / "release-rag.sha256")
+
+    assert RagPack.load(pack_path, checksum_path=checksum_path).manifest["document_count"] == 2
+
+    manifest = pack_path / "manifest.json"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('"schema_version": 1', '"schema_version": 2'),
+        encoding="utf-8",
+    )
+    with pytest.raises(PackError, match="external RAG manifest checksum mismatch"):
+        RagPack.load(pack_path, checksum_path=checksum_path)
+
+
+def test_external_checksum_is_auto_detected_next_to_pack(tmp_path: Path) -> None:
+    pack_path = tmp_path / "routeros-rag"
+    load_or_build(pack_path, index_url=INDEX_URL, fetcher=PAGES.__getitem__)
+    write_external_checksum(pack_path)
+
+    assert RagPack.load(pack_path).search("access concentrator")
+
+
+def test_external_checksum_cannot_be_stored_inside_pack(tmp_path: Path) -> None:
+    pack_path = tmp_path / "routeros-rag"
+    load_or_build(pack_path, index_url=INDEX_URL, fetcher=PAGES.__getitem__)
+
+    with pytest.raises(PackError, match="outside the pack directory"):
+        write_external_checksum(pack_path, pack_path / "manifest.sha256")
 
 
 def test_fetch_url_retries_a_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -158,6 +158,10 @@ network request. Search uses the standard-library SQLite FTS5 index, so it needs
 an embedding model. URLs displayed beside results are source attribution stored in the local index;
 the agent does not open them.
 
+For a released corpus, keep its external `<rag-directory>.sha256` sidecar beside the pack (or set
+`MTH_RAG_CHECKSUM`). It pins `manifest.json`; the manifest pins the database, index, and source
+pages. `mth rag --checksum <sidecar>` verifies the same chain explicitly.
+
 Project-owned field recipes live in [`docs/field-recipes`](docs/field-recipes). Adding a Markdown
 card there makes it available to `search_field_recipes` without downloading anything.
 

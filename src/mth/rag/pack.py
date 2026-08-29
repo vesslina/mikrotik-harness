@@ -27,6 +27,7 @@ from mth.core.mcp_client.runtime import project_root
 
 SCHEMA_VERSION = 1
 PACK_ENV = "MTH_RAG_HOME"
+CHECKSUM_ENV = "MTH_RAG_CHECKSUM"
 DEFAULT_MAX_CHUNK_CHARS = 2_400
 DEFAULT_MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_DOCUMENTS = 4_000
@@ -55,8 +56,14 @@ class RagPack:
     manifest: dict[str, Any]
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> RagPack:
+    def load(
+        cls,
+        path: str | Path | None = None,
+        *,
+        checksum_path: str | Path | None = None,
+    ) -> RagPack:
         pack_path = resolve_pack_dir(path)
+        _verify_external_checksum(pack_path, checksum_path)
         manifest = _validate(pack_path)
         return cls(pack_path, manifest)
 
@@ -150,11 +157,12 @@ def load_or_build(
     fetcher: Fetcher | None = None,
     source_name: str = "RouterOS Manual",
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    checksum_path: str | Path | None = None,
 ) -> RagPack:
     """Load without network when populated; build only when the directory is empty."""
     pack_path = resolve_pack_dir(path)
     if pack_path.exists() and any(pack_path.iterdir()):
-        return RagPack.load(pack_path)
+        return RagPack.load(pack_path, checksum_path=checksum_path)
     if not index_url:
         raise PackError(f"RAG pack is empty at {pack_path}; an index URL is required to build it")
     return build_pack(
@@ -163,6 +171,7 @@ def load_or_build(
         fetcher=fetcher or fetch_url,
         source_name=source_name,
         max_chunk_chars=max_chunk_chars,
+        checksum_path=checksum_path,
     )
 
 
@@ -204,6 +213,7 @@ def build_pack(
     fetcher: Fetcher,
     source_name: str = "RouterOS Manual",
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    checksum_path: str | Path | None = None,
 ) -> RagPack:
     """Build beside the destination, validate it, then promote the complete directory."""
     if max_chunk_chars < 256:
@@ -230,7 +240,70 @@ def build_pack(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return RagPack.load(pack_path)
+    return RagPack.load(pack_path, checksum_path=checksum_path)
+
+
+def write_external_checksum(
+    pack_path: str | Path,
+    checksum_path: str | Path | None = None,
+) -> Path:
+    """Write a release-side checksum for the pack manifest.
+
+    The manifest already covers the database, index, and every source file. Keeping this
+    checksum outside the pack gives a release operator an independent integrity anchor.
+    """
+
+    resolved_pack = resolve_pack_dir(pack_path)
+    _validate(resolved_pack)
+    manifest = resolved_pack / "manifest.json"
+    target = _resolve_checksum_path(resolved_pack, checksum_path, for_write=True)
+    assert target is not None
+    _ensure_external_checksum_path(resolved_pack, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{_sha256_file(manifest)}  manifest.json\n", encoding="ascii")
+    return target
+
+
+def _resolve_checksum_path(
+    pack_path: Path,
+    requested: str | Path | None,
+    *,
+    for_write: bool = False,
+) -> Path | None:
+    if requested is not None:
+        return Path(requested).expanduser().resolve()
+    configured = os.environ.get(CHECKSUM_ENV)
+    if configured:
+        return Path(configured).expanduser().resolve()
+    sibling = pack_path.with_name(f"{pack_path.name}.sha256")
+    return sibling.resolve() if for_write or sibling.is_file() else None
+
+
+def _verify_external_checksum(pack_path: Path, requested: str | Path | None) -> None:
+    checksum_path = _resolve_checksum_path(pack_path, requested)
+    if checksum_path is None:
+        return
+    _ensure_external_checksum_path(pack_path, checksum_path)
+    try:
+        line = checksum_path.read_text(encoding="ascii").strip()
+        match = re.fullmatch(r"([0-9a-fA-F]{64})[ \t]+\*?(manifest\.json)", line)
+        if match is None:
+            raise PackError(f"invalid external RAG checksum file: {checksum_path}")
+        manifest = _safe_member(pack_path, match.group(2))
+        if _sha256_file(manifest) != match.group(1).lower():
+            raise PackError("external RAG manifest checksum mismatch")
+    except PackError:
+        raise
+    except (OSError, UnicodeError) as error:
+        raise PackError(f"cannot read external RAG checksum: {checksum_path}") from error
+
+
+def _ensure_external_checksum_path(pack_path: Path, checksum_path: Path) -> None:
+    try:
+        checksum_path.resolve().relative_to(pack_path.resolve())
+    except ValueError:
+        return
+    raise PackError("external RAG checksum must be stored outside the pack directory")
 
 
 def _write_pack(

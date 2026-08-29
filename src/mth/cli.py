@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="https://manual.mikrotik.com/llms.txt",
         help="Markdown index used only when building an empty RAG pack",
     )
+    parser.add_argument(
+        "--checksum",
+        type=Path,
+        help="external SHA-256 sidecar for manifest.json (default: <rag-dir>.sha256 if present)",
+    )
     parser.add_argument("--query", help="search the RAG pack after loading it")
     parser.add_argument("--limit", type=int, default=5, help="maximum RAG search results")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -114,6 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             query=args.query,
             limit=args.limit,
             as_json=args.as_json,
+            checksum_path=args.checksum,
         )
 
     try:
@@ -162,13 +168,14 @@ def run_rag(
     query: str | None,
     limit: int,
     as_json: bool,
+    checksum_path: Path | None = None,
 ) -> int:
     """Load a copied pack offline, or build it once when its directory is empty."""
 
     from mth.rag import PackError, load_or_build
 
     try:
-        pack = load_or_build(path, index_url=index_url)
+        pack = load_or_build(path, index_url=index_url, checksum_path=checksum_path)
         hits = pack.search(query, limit=limit) if query else ()
     except (OSError, PackError, ValueError) as error:
         if as_json:
