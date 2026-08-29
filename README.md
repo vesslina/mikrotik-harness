@@ -89,8 +89,8 @@ cd mikrotik-harness
 
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-npm --prefix external/mikromcp ci
-npm --prefix external/mikromcp run build
+npm.cmd --prefix external/mikromcp ci
+npm.cmd --prefix external/mikromcp run build
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
@@ -198,19 +198,6 @@ mth discover --broadcast 192.168.56.255
 Private state is stored below `.mth/` and ignored by Git: router registration, pinned trust
 records, encrypted provider secrets, runbook history, chat sessions, HIGH RISK recovery artifacts,
 and the optional manual pack. Do not publish this directory.
-
-## Offline field deployment
-
-Copying a development virtual environment to another PC is not supported: Windows venv launchers
-contain machine-specific paths. The 1.0 release target is a per-user offline bundle containing a
-private CPython runtime, private Node.js runtime, prebuilt MikroMCP, a Python wheelhouse, and an
-optional operator-supplied RAG pack. The target laptop will need no Git, npm, global Python/Node,
-administrator rights, or internet connection.
-
-The frozen bundle layout, install flow, dependency inventory, and clean-machine acceptance matrix
-are documented in [Windows offline distribution](docs/windows-offline-distribution.md). Until that
-bundle passes the Python 3.11 and 3.12 clean-machine matrix, source installation above is the only
-supported installation method.
 
 ## Development checks
 

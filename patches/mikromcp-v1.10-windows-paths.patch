@@ -1,0 +1,40 @@
+diff --git a/test/unit/config/app-config.test.ts b/test/unit/config/app-config.test.ts
+index 7de29eb..f054cd3 100644
+--- a/test/unit/config/app-config.test.ts
++++ b/test/unit/config/app-config.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect, afterEach } from "vitest";
+-import { join } from "node:path";
++import { join, normalize } from "node:path";
+ import { homedir } from "node:os";
+ import { loadAppConfig } from "../../../src/config/app-config.js";
+ 
+@@ -111,23 +111,23 @@ describe("loadAppConfig", () => {
+ 
+   describe("v0.8 snapshot/journal config", () => {
+     it("snapshotDir defaults to ~/.mikromcp/data/snapshots", () => {
+-      expect(loadAppConfig().snapshotDir).toBe(join(homedir(), ".mikromcp", "data", "snapshots"));
++      expect(normalize(loadAppConfig().snapshotDir)).toBe(normalize(join(homedir(), ".mikromcp", "data", "snapshots")));
+     });
+ 
+     it("journalPath defaults to ~/.mikromcp/data/write-journal.ndjson", () => {
+-      expect(loadAppConfig().journalPath).toBe(
++      expect(normalize(loadAppConfig().journalPath)).toBe(normalize(
+         join(homedir(), ".mikromcp", "data", "write-journal.ndjson"),
+-      );
++      ));
+     });
+ 
+     it("snapshotDir uses MIKROMCP_DATA_DIR as prefix", () => {
+       process.env.MIKROMCP_DATA_DIR = "/var/mikromcp";
+-      expect(loadAppConfig().snapshotDir).toBe("/var/mikromcp/snapshots");
++      expect(normalize(loadAppConfig().snapshotDir)).toBe(normalize("/var/mikromcp/snapshots"));
+     });
+ 
+     it("journalPath uses MIKROMCP_DATA_DIR as prefix", () => {
+       process.env.MIKROMCP_DATA_DIR = "/var/mikromcp";
+-      expect(loadAppConfig().journalPath).toBe("/var/mikromcp/write-journal.ndjson");
++      expect(normalize(loadAppConfig().journalPath)).toBe(normalize("/var/mikromcp/write-journal.ndjson"));
+     });
+   });
+ });

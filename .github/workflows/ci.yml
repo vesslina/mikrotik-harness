@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and developer checks
+        run: python -m pip install --upgrade pip setuptools && python -m pip install ".[dev]"
+      - name: Tests
+        run: python -m pytest
+      - name: Ruff
+        run: python -m ruff check src tests
+      - name: Mypy
+        run: python -m mypy
+      - name: Pip audit
+        run: python -m pip install pip-audit && pip-audit --skip-editable
+
+  mikromcp-windows:
+    name: MikroMCP Windows runtime
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: external/mikromcp/package-lock.json
+      - name: MikroMCP tests with Windows path overlay
+        shell: pwsh
+        run: ./scripts/run-mikromcp-tests.ps1
+      - name: Build
+        working-directory: external/mikromcp
+        run: npm.cmd run build

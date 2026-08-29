@@ -1,6 +1,6 @@
 # Windows offline distribution
 
-Status: distribution contract for the 1.0 release candidate. The bundle is not a supported release
+Status: distribution contract for the current beta release candidate. The bundle is not a supported release
 artifact until every clean-machine check below passes.
 
 ## Decision
@@ -57,6 +57,8 @@ MikroTikHarness-<version>-win-x64-py312/
 │   └── node-v<exact-version>-win-x64.zip
 ├── wheelhouse/
 │   ├── mikrotik_harness-<version>-py3-none-any.whl
+│   ├── pip-<safe-version>-py3-none-any.whl
+│   ├── setuptools-<safe-version>-py3-none-any.whl
 │   └── <resolved binary dependency wheels>
 ├── app/
 │   ├── external/mikromcp/
@@ -72,7 +74,8 @@ MikroTikHarness-<version>-win-x64-py312/
 `optional-private/.mth/rag` is used for an internal field package, not the public GitHub release.
 The public project does not redistribute the MikroTik documentation corpus.
 
-Every file in the ZIP is covered by `manifest.sha256`. The release builder records the exact
+Every payload file in the ZIP (the manifest itself is the checksum index) is covered by
+`manifest.sha256`. The release builder records the exact
 Python installer, Node ZIP, Python wheels, MikroMCP git commit, npm lockfile, and licenses used.
 
 ## Installer contract
@@ -81,17 +84,25 @@ Python installer, Node ZIP, Python wheels, MikroMCP git commit, npm lockfile, an
 
 1. Require native x64 Windows 10 or newer.
 2. Verify `manifest.sha256` before executing bundled binaries.
-3. Install the full CPython offline installer per user into
+3. Reuse an existing compatible 64-bit CPython of the bundle's minor version when one is
+   available. Otherwise install the bundled CPython per user into
    `%LOCALAPPDATA%\Programs\MikroTikHarness\runtime\python` with no launcher and no global PATH
-   change.
-4. Extract the private Node.js ZIP under the same application directory.
-5. Create a fresh venv and install with
-   `--no-index --only-binary=:all: --find-links <wheelhouse>`.
+   change. Verify the interpreter before continuing.
+4. Extract the private Node.js ZIP under the same application directory and verify Node.js 22+.
+5. Create a fresh venv, upgrade its bundled pip/setuptools from the local bootstrap wheels, and
+   install with `--no-index --only-binary=:all: --find-links <wheelhouse>`.
 6. Copy the prebuilt MikroMCP runtime, project-owned field cards, and an optional private RAG pack.
 7. Create `bin\mth.cmd`. The launcher sets `MTH_PROJECT_ROOT`, prepends the private Node
    directory only for this process, and calls the installed `mth.exe`.
-8. Add only the application `bin` directory to the current user's PATH after explicit consent.
-9. Run the offline smoke checks below and fail without deleting diagnostic logs.
+8. Add only the application `bin` directory to the current user's PATH when the operator passes
+   the explicit `-AddToPath` switch.
+9. Run the offline import, CLI-help, and live bundled MikroMCP catalog smoke checks below and fail
+   without deleting diagnostic logs.
+
+The application always runs from its own venv; it never installs Python packages into an existing
+interpreter. When an existing CPython is reused, that base interpreter must remain installed for
+the venv to work. Node.js is always extracted from the bundled ZIP into the application directory,
+so an existing system Node.js installation cannot conflict with it.
 
 The installer never invokes Git, npm, PyPI, GitHub, or the MikroTik documentation site. Re-running
 the same version repairs missing application files without deleting `.mth` user data.
@@ -104,14 +115,16 @@ The release builder is the only machine that needs internet, Git, and npm.
 
 1. Check out the release commit with `--recurse-submodules`.
 2. Verify that `external/mikromcp` is the gitlink commit recorded by the harness repository.
-3. Run `npm ci`, the MikroMCP checks, and `npm run build`.
-4. Copy `dist/main.js` and production npm dependencies; do not copy the development checkout.
-5. Build the harness wheel.
-6. Resolve a locked Python dependency set separately for CPython 3.11 and 3.12 on win_amd64.
-7. Download only wheels. `pip download --only-binary=:all:` must fail if any dependency would
+3. Install the build environment from `.[dev]` plus `pip-audit`; the builder reruns the full
+   Python gate before creating any output.
+4. Run `npm.cmd ci`, the MikroMCP checks, and `npm.cmd run build`.
+5. Copy `dist/main.js` and production npm dependencies; do not copy the development checkout.
+6. Build the harness wheel.
+7. Resolve a locked Python dependency set separately for CPython 3.11 and 3.12 on win_amd64.
+8. Download only wheels. `pip download --only-binary=:all:` must fail if any dependency would
    require a source build.
-8. Generate `THIRD_PARTY_NOTICES` and `manifest.sha256`.
-9. Build the two ZIPs and test each from a clean Windows snapshot with networking disabled.
+9. Generate `THIRD_PARTY_NOTICES` and `manifest.sha256`.
+10. Build the two ZIPs and test each from a clean Windows snapshot with networking disabled.
 
 ## Dependency inventory
 
@@ -123,12 +136,14 @@ Direct Python runtime requirements are defined in `pyproject.toml`:
 - PyYAML;
 - Textual.
 
-Their transitive dependencies are release inputs, not a hand-maintained list. Each release records
-the resolved versions and hashes in its wheelhouse manifest. Developer-only pytest, Ruff, mypy, and
-typing stubs are excluded from the field bundle.
+Their transitive dependencies are release inputs, not a hand-maintained list. Each wheel filename,
+the lockfile, and the generated `manifest.sha256` record the exact files shipped in that release.
+Developer-only pytest, Ruff, mypy, and typing stubs are excluded from the field bundle.
 
 MikroMCP v1.10.0 requires Node.js 22 or newer. Its JavaScript dependencies are resolved only from
-the pinned upstream `package-lock.json`. The target does not run npm.
+the pinned upstream `package-lock.json`. The release gate runs `npm audit --omit=dev` because the
+bundle contains only production `node_modules`; development-only advisories printed by `npm ci` do
+not ship to an operator machine. The target does not run npm.
 
 The RouterOS manual pack and HIGH RISK backups are application data, not code dependencies. A full
 `.mth/rag` directory can be copied from a USB drive. If it is absent, the rest of `mth` still
@@ -174,3 +189,24 @@ A source folder also assumes compatible global Python, Node.js, npm state, and a
 submodule. Building an EXE with another packaging layer would hide these assumptions rather than
 remove them. The private-runtime ZIP keeps the original runtimes visible, pinned, replaceable, and
 easy to diagnose.
+
+## Build commands
+
+Run these commands on a connected Windows build machine from a clean checkout. The two runtime
+archives are explicit inputs, so a build cannot accidentally produce a bundle that later needs the
+internet:
+
+```powershell
+pwsh -NoProfile -File .\scripts\build-offline.ps1 `
+  -PythonVersion 3.12 `
+  -PythonInstaller .\inputs\python-3.12.x-amd64.exe `
+  -NodeArchive .\inputs\node-v22.x-win-x64.zip
+```
+
+Use `-PythonVersion 3.11` for the compatibility bundle. Add `-RagPack <directory>` only for a
+private field bundle; the public artifact must omit the copyrighted manual corpus. The builder
+fails on a dirty checkout unless `-AllowDirty` is explicitly supplied, applies the pinned
+MikroMCP Windows/audit overlays temporarily, and emits both a portable directory and a ZIP under
+`dist\offline`. On the target machine run `install.ps1 -AddToPath` from the extracted bundle when
+the `mth` command should be available in new PowerShell windows; no npm, Git,
+PyPI, GitHub, or global Python/Node installation is used.

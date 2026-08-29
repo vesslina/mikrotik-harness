@@ -92,8 +92,8 @@ cd mikrotik-harness
 
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-npm --prefix external/mikromcp ci
-npm --prefix external/mikromcp run build
+npm.cmd --prefix external/mikromcp ci
+npm.cmd --prefix external/mikromcp run build
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
@@ -203,18 +203,6 @@ mth discover --broadcast 192.168.56.255
 Приватное состояние хранится в `.mth/` и исключено из Git: регистрация роутеров, trust-записи,
 зашифрованные secrets провайдеров, история runbook-ов и чатов, recovery-файлы HIGH RISK и
 опциональный manual pack. Не публикуйте эту папку.
-
-## Офлайн-установка на полевой ноутбук
-
-Копирование готовой `.venv` с другого компьютера не поддерживается: Windows venv содержит
-машинно-зависимые пути. Цель релиза 1.0 — per-user offline bundle с приватными CPython и Node.js,
-собранным MikroMCP, wheelhouse Python и опциональным пользовательским RAG pack. На целевом ноутбуке
-не потребуются Git, npm, глобальные Python/Node, права администратора и интернет.
-
-Зафиксированные структура bundle, алгоритм установки, список зависимостей и clean-machine matrix
-описаны в [Windows offline distribution](docs/windows-offline-distribution.md). Пока пакет не прошёл
-чистые тесты на Python 3.11 и 3.12, единственный поддерживаемый способ — установка из исходников
-выше.
 
 ## Проверки для разработчика
 

@@ -1,9 +1,15 @@
 /.venv/
+/.release-venv/
 /.graphify-venv/
 /graphify-out/
+/build/
+/dist/
+/exe/
+/offline-install-ru.md
 /.mypy_cache/
 /.pytest_cache/
 /.ruff_cache/
+/.vite/
 /.mth/
 **/__pycache__/
 *.egg-info/

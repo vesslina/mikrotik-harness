@@ -1,0 +1,52 @@
+# MikroTik Harness — third-party notices
+
+This project is MIT-licensed; the project license is in `LICENSE`. The runtime bundle also ships
+the pinned MikroMCP runtime and the dependencies listed below. Their original license texts must be
+retained in the bundle. The release builder records the exact resolved versions in its wheelhouse,
+`package-lock.json`, and release manifest.
+
+## Python runtime dependencies
+
+- **AsyncSSH** — EPL-2.0 OR GPL-2.0-or-later. https://github.com/ronf/asyncssh
+- **cryptography** — Apache-2.0 OR BSD-3-Clause. https://github.com/pyca/cryptography
+- **MCP Python SDK** (`mcp`) — MIT. https://github.com/modelcontextprotocol/python-sdk
+- **PyYAML** — MIT. https://github.com/yaml/pyyaml
+- **Textual** — MIT. https://github.com/Textualize/textual
+- **pip** — MIT. https://github.com/pypa/pip
+- **setuptools** — MIT. https://github.com/pypa/setuptools
+
+Their transitive Python dependencies are resolved from the pinned environment at build time. The
+wheelhouse is shipped as the source of truth for the offline installer; do not replace it with a
+network install on an operator machine.
+
+## MikroMCP and Node.js runtime dependencies
+
+**MikroMCP v1.10.0** is included as a pinned git submodule/runtime overlay and is MIT-licensed:
+https://github.com/AliKarami/MikroMCP
+
+Its production dependency graph is locked by `external/mikromcp/package-lock.json`. The direct
+runtime packages include:
+
+- `@inquirer/prompts` — MIT;
+- `@modelcontextprotocol/sdk` — MIT;
+- `basic-ftp` — MIT;
+- `bcryptjs` — BSD-3-Clause;
+- `chalk` — MIT;
+- `commander` — MIT;
+- `dotenv` — BSD-2-Clause;
+- `nanoid` — MIT;
+- `pino` — MIT;
+- `ssh2` — MIT;
+- `undici` — MIT;
+- `yaml` — ISC;
+- `zod` — MIT.
+
+The release bundle keeps the corresponding `node_modules` license files and the MikroMCP
+`LICENSE`. Node.js is a separate third-party runtime distributed from its official Windows archive;
+its own license is retained with that runtime.
+
+## Release rule
+
+Do not publish a bundle unless `manifest.sha256`, the exact lockfiles, and all license files are
+generated from the same source commit. The public bundle does not include the copyrighted RouterOS
+manual corpus; an operator may copy a separately obtained local RAG pack into `.mth/rag`.
