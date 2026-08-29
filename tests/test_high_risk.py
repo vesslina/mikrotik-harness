@@ -2,9 +2,30 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.high_risk import HighRiskService, RouterOsSshSession
 from mth.core.mcp_client.models import McpToolResult
 from mth.core.registration import ConfigPaths, MikroMcpConfigStore, PendingRegistration
+
+
+class _Protector:
+    name = "test-protector"
+
+    def protect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+    def unprotect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+
+def _secret_store(tmp_path) -> ProviderSecretStore:
+    return ProviderSecretStore(
+        ProviderSecretPaths(
+            file=tmp_path / "high-risk-secrets.json",
+            key_file=tmp_path / "high-risk-secrets.key",
+        ),
+        protector=_Protector(),
+    )
 
 
 class _Reader:
@@ -92,6 +113,7 @@ class _SftpClient:
     def __init__(self) -> None:
         self.closed = False
         self.gets: list[tuple[str, Path]] = []
+        self.removes: list[str] = []
 
     async def __aenter__(self):
         return self
@@ -103,6 +125,9 @@ class _SftpClient:
     async def get(self, remote_name: str, local_path: Path) -> None:
         self.gets.append((remote_name, local_path))
         local_path.write_bytes(b"artifact")
+
+    async def remove(self, remote_name: str) -> None:
+        self.removes.append(remote_name)
 
 
 class _SftpConnection(_Connection):
@@ -235,6 +260,18 @@ def test_connection_loss_invalidates_safe_mode_state() -> None:
     asyncio.run(scenario())
 
 
+def test_safe_mode_action_counter_counts_routeros_floating_undo_rows() -> None:
+    raw = (
+        "Flags: U, F - FLOATING-UNDO\r\n"
+        "F redo=/ip address add address=192.0.2.1/24\r\n"
+        "  undo=/ip address remove *1\r\n"
+        "U redo=\r\n"
+        "F redo=/ip route add dst-address=0.0.0.0/0\r\n"
+    )
+
+    assert RouterOsSshSession._count_floating_undo(raw) == 2
+
+
 def test_sftp_download_closes_subsystem_channel(tmp_path) -> None:
     async def scenario() -> None:
         reader = _Reader()
@@ -247,6 +284,21 @@ def test_sftp_download_closes_subsystem_channel(tmp_path) -> None:
 
         assert local_path.read_bytes() == b"artifact"
         assert len(connection.clients) == 1
+        assert connection.clients[0].closed is True
+
+    asyncio.run(scenario())
+
+
+def test_sftp_delete_removes_remote_artifact(tmp_path) -> None:
+    async def scenario() -> None:
+        reader = _Reader()
+        writer = _Writer(reader)
+        connection = _SftpConnection()
+        session = RouterOsSshSession(connection, _Process(reader, writer))
+
+        await session.delete_remote("preflight.backup")
+
+        assert connection.clients[0].removes == ["preflight.backup"]
         assert connection.clients[0].closed is True
 
     asyncio.run(scenario())
@@ -275,6 +327,7 @@ class _PreflightSession:
     def __init__(self) -> None:
         self.safe_mode = False
         self.downloads: list[str] = []
+        self.deleted: list[str] = []
         self.aborted = False
 
     async def download(self, remote_name: str, local_path: Path) -> None:
@@ -284,6 +337,9 @@ class _PreflightSession:
     async def enter_safe_mode(self) -> bool:
         self.safe_mode = True
         return True
+
+    async def delete_remote(self, remote_name: str) -> None:
+        self.deleted.append(remote_name)
 
     async def abort_and_close(self) -> None:
         self.aborted = True
@@ -298,7 +354,10 @@ class _FailingPreflightSession(_PreflightSession):
 
 def test_preflight_creates_and_verifies_local_backup_and_export(monkeypatch, tmp_path) -> None:
     async def scenario() -> None:
-        store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
+        store = MikroMcpConfigStore(
+            ConfigPaths(root=tmp_path / "mikromcp"),
+            router_secret_store=_secret_store(tmp_path / "mikromcp"),
+        )
         store.persist(
             PendingRegistration(
                 router_id="mikrotik-afe23e",
@@ -326,6 +385,7 @@ def test_preflight_creates_and_verifies_local_backup_and_export(monkeypatch, tmp
             store,
             backend_factory=lambda: backend,
             connection_factory=connection_factory,
+            secrets_store=_secret_store(tmp_path / "high-risk-secrets"),
         )
         key = await service.probe_host_key("mikrotik-afe23e")
         service.trust_host_key(key)
@@ -341,6 +401,10 @@ def test_preflight_creates_and_verifies_local_backup_and_export(monkeypatch, tmp
             session.artifacts.backup_remote_name,
             session.artifacts.export_remote_name,
         ]
+        assert preflight_session.deleted == [
+            session.artifacts.backup_remote_name,
+            session.artifacts.export_remote_name,
+        ]
         assert "router-password" not in session.artifacts.manifest_path.read_text(encoding="utf-8")
 
     asyncio.run(scenario())
@@ -350,7 +414,10 @@ def test_failed_preflight_cleans_remote_files_local_partials_and_secret(
     monkeypatch, tmp_path
 ) -> None:
     async def scenario() -> None:
-        store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
+        store = MikroMcpConfigStore(
+            ConfigPaths(root=tmp_path / "mikromcp"),
+            router_secret_store=_secret_store(tmp_path / "mikromcp"),
+        )
         store.persist(
             PendingRegistration(
                 router_id="mikrotik-afe23e",
@@ -378,6 +445,7 @@ def test_failed_preflight_cleans_remote_files_local_partials_and_secret(
             store,
             backend_factory=lambda: backend,
             connection_factory=connection_factory,
+            secrets_store=_secret_store(tmp_path / "high-risk-secrets"),
         )
         key = await service.probe_host_key("mikrotik-afe23e")
         service.trust_host_key(key)
@@ -409,7 +477,10 @@ def test_failed_preflight_cleans_remote_files_local_partials_and_secret(
 
 def test_cancelled_preflight_also_cleans_secret_and_remote_artifacts(monkeypatch, tmp_path) -> None:
     async def scenario() -> None:
-        store = MikroMcpConfigStore(ConfigPaths(root=tmp_path / "mikromcp"))
+        store = MikroMcpConfigStore(
+            ConfigPaths(root=tmp_path / "mikromcp"),
+            router_secret_store=_secret_store(tmp_path / "mikromcp"),
+        )
         store.persist(
             PendingRegistration(
                 router_id="mikrotik-afe23e",
@@ -436,6 +507,7 @@ def test_cancelled_preflight_also_cleans_secret_and_remote_artifacts(monkeypatch
             store,
             backend_factory=lambda: backend,
             connection_factory=connection_factory,
+            secrets_store=_secret_store(tmp_path / "high-risk-secrets"),
         )
         key = await service.probe_host_key("mikrotik-afe23e")
         service.trust_host_key(key)

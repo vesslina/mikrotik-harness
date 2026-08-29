@@ -691,10 +691,15 @@ def test_high_risk_executes_raw_mcp_writes_and_persistent_ssh_without_proposal()
         class Executor:
             def __init__(self) -> None:
                 self.commands: list[tuple[str, int, int]] = []
+                self.refreshes = 0
 
             async def execute(self, command, timeout_seconds=20, max_output_bytes=65_536):
                 self.commands.append((command, timeout_seconds, max_output_bytes))
                 return McpToolResult(("ether1",), {"status": "ok"}, False)
+
+            async def refresh_safe_mode_action_count(self):
+                self.refreshes += 1
+                return 1
 
         class Provider:
             def __init__(self) -> None:
@@ -745,8 +750,61 @@ def test_high_risk_executes_raw_mcp_writes_and_persistent_ssh_without_proposal()
             )
         ]
         assert executor.commands == [("/interface print", 20, 65_536)]
+        assert executor.refreshes == 1
         assert not any(isinstance(event, RunbookProposal) for event in events)
         assert any(isinstance(event, ToolResult) for event in events)
+
+    asyncio.run(scenario())
+
+
+def test_high_risk_marks_direct_write_failed_when_safe_mode_transport_is_lost() -> None:
+    async def scenario() -> None:
+        schema = {
+            "type": "object",
+            "properties": {"routerId": {"type": "string"}},
+        }
+
+        class Backend:
+            async def list_tools(self) -> tuple[McpTool, ...]:
+                return (McpTool("manage_ip_address", "Manage IP", schema, {}),)
+
+            async def call_tool(self, _name, _arguments=None) -> McpToolResult:
+                return McpToolResult(("address added",), {"changed": True}, False)
+
+        class Executor:
+            ssh = type("Channel", (), {"alive": True, "safe_mode_active": False})()
+
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("the test loses the channel during the REST write")
+
+            async def refresh_safe_mode_action_count(self):
+                return None
+
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, _messages, _tools=()):
+                self.calls += 1
+                if self.calls == 1:
+                    return ProviderReply(
+                        "Applying the requested address.",
+                        (ProviderToolCall("write-1", "manage_ip_address", {"action": "add"}),),
+                    )
+                return ProviderReply("Канал безопасности потерян.", ())
+
+        loop = ReadOnlyAgentLoop(
+            preset=_preset(),
+            provider=Provider(),
+            backend=Backend(),
+            router_id="mikrotik-afe23e",
+        )
+        loop.set_high_risk_executor(Executor())
+        events = await loop.run("Add an address", AgentMode.HIGH_RISK)
+
+        result = next(event for event in events if isinstance(event, ToolResult))
+        assert result.is_error is True
+        assert result.structured_content["status"] == "connection_lost"
 
     asyncio.run(scenario())
 

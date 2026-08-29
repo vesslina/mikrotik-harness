@@ -39,6 +39,9 @@ class FieldPack:
         invalid: list[str] = []
         for source in sorted(root.rglob("*.md")):
             try:
+                if source.is_symlink():
+                    raise ValueError("field recipe symlinks are not allowed")
+                source.resolve().relative_to(root.resolve())
                 recipe = _parse_recipe(source, root)
             except (OSError, TypeError, ValueError, yaml.YAMLError):
                 invalid.append(str(source.relative_to(root)))

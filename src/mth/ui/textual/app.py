@@ -577,14 +577,14 @@ class DiscoveryApp(App[None]):
     def _saved_password(self) -> str:
         try:
             return self._credential_store.get("last-routeros") or ""
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             return ""
 
     def _remember_connection(self, address: str, password: str) -> None:
         try:
             self._settings.save_last_address(address)
             self._credential_store.set("last-routeros", password)
-        except (OSError, ValueError):
+        except (OSError, RuntimeError, ValueError):
             # Connection must remain usable even if the local credential vault is unavailable.
             pass
 

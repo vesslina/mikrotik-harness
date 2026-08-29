@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mth.rag import PackError, RagPack, load_or_build
-from mth.rag.pack import fetch_url
+from mth.rag.pack import _index_pages, fetch_url
 
 INDEX_URL = "https://manual.example/llms.txt"
 PAGES = {
@@ -99,9 +99,45 @@ def test_fetch_url_retries_a_transient_failure(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("mth.rag.pack.urlopen", open_url)
     monkeypatch.setattr("mth.rag.pack.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "mth.rag.pack.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
 
     assert fetch_url("https://manual.example/page.md") == b"ok"
     assert calls == 2
+
+
+def test_fetch_url_rejects_dns_that_resolves_to_private_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "mth.rag.pack.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("192.168.1.10", 443))],
+    )
+
+    with pytest.raises(PackError, match="resolves to a private"):
+        fetch_url(INDEX_URL)
+
+
+def test_fetch_url_allows_loopback_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b"local manual"
+
+    monkeypatch.setattr(
+        "mth.rag.pack.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("127.0.0.1", 80))],
+    )
+    monkeypatch.setattr("mth.rag.pack.urlopen", lambda *_args, **_kwargs: Response())
+
+    assert fetch_url("http://127.0.0.1/manual.md") == b"local manual"
 
 
 def test_lexical_retrieval_eval_prefers_exact_topics_then_falls_back(tmp_path: Path) -> None:
@@ -162,3 +198,34 @@ def test_search_deduplicates_repeated_chunks_from_the_same_heading(tmp_path: Pat
     hits = pack.search("routeros command", limit=5)
 
     assert len(hits) == 1
+
+
+def test_rag_index_skips_cross_origin_and_private_links() -> None:
+    index = (
+        "- [safe](safe.md)\n"
+        "- [other](https://other.example/other.md)\n"
+        "- [local](https://127.0.0.1/local.md)\n"
+    )
+
+    assert _index_pages(index, INDEX_URL) == (("safe", "https://manual.example/safe.md"),)
+
+
+def test_rag_rejects_plain_http_non_loopback_index(tmp_path: Path) -> None:
+    with pytest.raises(PackError, match="plain HTTP"):
+        load_or_build(
+            tmp_path / "unsafe-rag",
+            index_url="http://manual.example/llms.txt",
+            fetcher=lambda _url: PAGES[INDEX_URL],
+        )
+
+
+def test_rag_caps_document_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import mth.rag.pack as pack_module
+
+    monkeypatch.setattr(pack_module, "DEFAULT_MAX_DOCUMENTS", 1)
+    with pytest.raises(PackError, match="maximum is 1"):
+        load_or_build(
+            tmp_path / "too-many-documents",
+            index_url=INDEX_URL,
+            fetcher=PAGES.__getitem__,
+        )

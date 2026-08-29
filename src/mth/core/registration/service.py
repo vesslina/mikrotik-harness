@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import socket
@@ -116,51 +117,72 @@ class RegistrationService:
         )
 
     async def register_and_verify(self, pending: PendingRegistration) -> RegistrationResult:
-        environment = self.store.persist(pending)
-        client = self._client_factory(environment)
+        snapshot = self.store.snapshot_registration_state()
         try:
+            environment = self.store.persist(pending)
+        except Exception:
+            self.store.restore_registration_state(snapshot)
+            raise
+        try:
+            client = self._client_factory(environment)
             inspection = await client.inspect_router(pending.router_id)
+            health = inspection.health.structured_content or {}
+            if not isinstance(health, dict):
+                raise RegistrationError(
+                    RegistrationErrorCode.BACKEND_HEALTH_FAILED,
+                    "MikroMCP returned malformed health data",
+                )
+            if inspection.health.is_error or health.get("healthy") is not True:
+                detail = inspection.health.text or str(
+                    health.get("error", "unknown health failure")
+                )
+                raise RegistrationError(RegistrationErrorCode.BACKEND_HEALTH_FAILED, detail)
+            status = inspection.system_status.structured_content or {}
+            if not isinstance(status, dict):
+                raise RegistrationError(
+                    RegistrationErrorCode.BACKEND_HEALTH_FAILED,
+                    "MikroMCP returned malformed system status data",
+                )
+            if inspection.system_status.is_error:
+                raise RegistrationError(
+                    RegistrationErrorCode.BACKEND_HEALTH_FAILED,
+                    inspection.system_status.text or "get_system_status failed",
+                )
+
+            sections = status.get("sections", {})
+            identity_section = sections.get("identity", {}) if isinstance(sections, dict) else {}
+            identity = str(
+                identity_section.get("name")
+                if isinstance(identity_section, dict)
+                else pending.identity or pending.router_id
+            )
+            if not identity or identity == "None":
+                identity = pending.identity or pending.router_id
+            return RegistrationResult(
+                router_id=pending.router_id,
+                identity=identity,
+                tool_count=len(inspection.tools),
+                health=health,
+                system_status=status,
+            )
+        except asyncio.CancelledError:
+            self.store.restore_registration_state(snapshot)
+            raise
+        except RegistrationError:
+            self.store.restore_registration_state(snapshot)
+            raise
         except RuntimeUnavailableError as error:
+            self.store.restore_registration_state(snapshot)
             raise RegistrationError(
                 RegistrationErrorCode.BACKEND_UNAVAILABLE,
                 str(error),
             ) from error
         except Exception as error:
+            self.store.restore_registration_state(snapshot)
             raise RegistrationError(
                 RegistrationErrorCode.BACKEND_HEALTH_FAILED,
                 f"MikroMCP connection failed: {error}",
             ) from error
-
-        health = inspection.health.structured_content or {}
-        if inspection.health.is_error or health.get("healthy") is not True:
-            detail = inspection.health.text or str(health.get("error", "unknown health failure"))
-            raise RegistrationError(
-                RegistrationErrorCode.BACKEND_HEALTH_FAILED,
-                detail,
-            )
-        status = inspection.system_status.structured_content or {}
-        if inspection.system_status.is_error:
-            raise RegistrationError(
-                RegistrationErrorCode.BACKEND_HEALTH_FAILED,
-                inspection.system_status.text or "get_system_status failed",
-            )
-
-        sections = status.get("sections", {})
-        identity_section = sections.get("identity", {}) if isinstance(sections, dict) else {}
-        identity = str(
-            identity_section.get("name")
-            if isinstance(identity_section, dict)
-            else pending.identity or pending.router_id
-        )
-        if not identity or identity == "None":
-            identity = pending.identity or pending.router_id
-        return RegistrationResult(
-            router_id=pending.router_id,
-            identity=identity,
-            tool_count=len(inspection.tools),
-            health=health,
-            system_status=status,
-        )
 
     @staticmethod
     def _ros_version(device: DeviceInfo | None) -> str:

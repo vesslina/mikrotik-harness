@@ -21,6 +21,7 @@ from mth.agent import (
     ToolCallFormat,
     ToolResult,
 )
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.registration import RegistrationResult
 from mth.core.runbooks import (
     RunbookApplyResult,
@@ -39,6 +40,29 @@ from mth.ui.textual.chat import (
     PixelLogo,
 )
 from mth.ui.textual.i18n import Language, UiSettingsPaths, UiSettingsStore
+
+
+class _TestProtector:
+    name = "test-protector"
+
+    def protect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+    def unprotect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+
+def _test_preset_store(path) -> ProviderPresetStore:
+    return ProviderPresetStore(
+        PresetPaths(file=path),
+        secret_store=ProviderSecretStore(
+            ProviderSecretPaths(
+                file=path.with_name("provider-secrets.json"),
+                key_file=path.with_name("provider-secrets.key"),
+            ),
+            protector=_TestProtector(),
+        ),
+    )
 
 
 def _preset() -> ProviderPreset:
@@ -410,7 +434,7 @@ def test_chat_detects_lost_high_risk_transport() -> None:
 def test_model_command_opens_wizard(tmp_path) -> None:
     async def scenario() -> None:
         preset_path = tmp_path / "providers.json"
-        store = ProviderPresetStore(PresetPaths(file=preset_path))
+        store = _test_preset_store(preset_path)
         runner = _Runner()
         screen = _screen(
             _profile(),
@@ -449,7 +473,7 @@ def test_model_command_opens_wizard(tmp_path) -> None:
 
 def test_models_picker_can_delete_preset_and_encrypted_key(tmp_path) -> None:
     async def scenario() -> None:
-        store = ProviderPresetStore(PresetPaths(file=tmp_path / "providers.json"))
+        store = _test_preset_store(tmp_path / "providers.json")
         preset = _preset()
         store.save(preset, api_key="delete-me-secret")
         screen = _screen(

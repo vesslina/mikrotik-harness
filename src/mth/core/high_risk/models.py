@@ -56,4 +56,5 @@ class SshExecResult:
     execution_time: float
     output_truncated: bool
     command_count: int
+    safe_mode_action_count: int | None = None
     error_detail: str | None = None

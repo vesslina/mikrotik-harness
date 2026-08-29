@@ -31,7 +31,7 @@ def test_provider_preset_keeps_only_api_key_environment_reference() -> None:
     preset = ProviderPreset(
         name="lab",
         provider=ProviderKind.OPENAI_COMPATIBLE,
-        base_url="http://192.168.56.1:1234/v1",
+        base_url="https://192.168.56.1:1234/v1",
         model="lab-model",
         api_key_env="MTH_LAB_API_KEY",
         capabilities=_capabilities(),
@@ -73,8 +73,19 @@ def test_sensitive_tool_opt_in_is_rejected_for_non_loopback_endpoint() -> None:
         ProviderPreset(
             name="remote",
             provider=ProviderKind.OPENAI_COMPATIBLE,
-            base_url="http://192.168.56.1:1234/v1",
+            base_url="https://192.168.56.1:1234/v1",
             model="remote-model",
             allow_sensitive_tool_data=True,
+            capabilities=_capabilities(),
+        )
+
+
+def test_plain_http_is_rejected_for_non_loopback_provider() -> None:
+    with pytest.raises(ValueError, match="HTTP provider endpoints"):
+        ProviderPreset(
+            name="remote",
+            provider=ProviderKind.OPENAI_COMPATIBLE,
+            base_url="http://192.168.56.1:1234/v1",
+            model="remote-model",
             capabilities=_capabilities(),
         )

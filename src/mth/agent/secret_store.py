@@ -20,6 +20,20 @@ class SecretProtector(Protocol):
     def unprotect(self, value: bytes) -> bytes: ...
 
 
+class _UnavailableProtector:
+    """Keep metadata-only stores usable while refusing every secret operation."""
+
+    name = "unavailable"
+
+    @staticmethod
+    def protect(_value: bytes) -> bytes:
+        raise RuntimeError("Windows DPAPI is unavailable; secret storage is disabled")
+
+    @staticmethod
+    def unprotect(_value: bytes) -> bytes:
+        raise RuntimeError("Windows DPAPI is unavailable; secret storage is disabled")
+
+
 class _DataBlob(ctypes.Structure):
     _fields_ = [
         ("cbData", wintypes.DWORD),
@@ -175,8 +189,9 @@ class ProviderSecretStore:
                 probe = protector.protect(b"mth-dpapi-probe")
                 if protector.unprotect(probe) == b"mth-dpapi-probe":
                     return protector
-            except OSError:
+            except Exception:
                 pass
+            return _UnavailableProtector()
         return FernetFileProtector(paths.key_file)
 
     def set(self, preset_name: str, api_key: str) -> None:
@@ -238,6 +253,10 @@ class ProviderSecretStore:
         if name == self._protector.name:
             return self._protector
         if name == FernetFileProtector.name:
+            if os.name == "nt":
+                raise RuntimeError(
+                    "Refusing to decrypt a Fernet secret on Windows without DPAPI"
+                )
             return FernetFileProtector(self.paths.key_file)
         if name == WindowsDpapiProtector.name and os.name == "nt":
             return WindowsDpapiProtector()

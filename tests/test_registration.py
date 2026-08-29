@@ -4,6 +4,7 @@ import ssl
 import pytest
 import yaml
 
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.discovery.models import DeviceInfo
 from mth.core.mcp_client.models import BackendInspection, McpTool, McpToolResult
 from mth.core.registration import (
@@ -15,6 +16,29 @@ from mth.core.registration import (
     RegistrationService,
     capture_tls_fingerprint,
 )
+
+
+class _Protector:
+    name = "test-protector"
+
+    def protect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+    def unprotect(self, value: bytes) -> bytes:
+        return bytes(byte ^ 0xA5 for byte in value)
+
+
+def _store(tmp_path) -> MikroMcpConfigStore:
+    return MikroMcpConfigStore(
+        ConfigPaths(root=tmp_path),
+        router_secret_store=ProviderSecretStore(
+            ProviderSecretPaths(
+                file=tmp_path / "router-secrets.json",
+                key_file=tmp_path / "router-secrets.key",
+            ),
+            protector=_Protector(),
+        ),
+    )
 
 
 def _device(version: str = "7.21.5 (long-term)") -> DeviceInfo:
@@ -61,7 +85,7 @@ def test_refused_tls_connection_recommends_www_ssl(monkeypatch) -> None:
 
 
 def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_path) -> None:
-    store = MikroMcpConfigStore(ConfigPaths(root=tmp_path))
+    store = _store(tmp_path)
     pending = PendingRegistration(
         router_id="mikrotik-afe23e",
         host="192.168.56.103",
@@ -101,11 +125,12 @@ def test_store_writes_pinned_router_operator_identity_and_separate_secret(tmp_pa
     assert "run_command" in operator["allowedToolPatterns"]
     assert "manage_*" in operator["allowedToolPatterns"]
     assert environment["ROUTER_MIKROTIK_AFE23E_PASS"] == "top-secret"
-    assert "top-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "top-secret" not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "top-secret" not in (tmp_path / "router-secrets.json").read_text(encoding="utf-8")
 
 
 def test_store_resolves_private_ssh_target_and_persists_separate_ssh_tofu(tmp_path) -> None:
-    store = MikroMcpConfigStore(ConfigPaths(root=tmp_path))
+    store = _store(tmp_path)
     store.persist(
         PendingRegistration(
             router_id="mikrotik-afe23e",
@@ -140,6 +165,53 @@ def test_store_resolves_private_ssh_target_and_persists_separate_ssh_tofu(tmp_pa
     assert "router-password" not in (tmp_path / "ssh-hosts.yaml").read_text(encoding="utf-8")
 
 
+def test_runtime_environment_migrates_legacy_router_credentials(tmp_path) -> None:
+    store = _store(tmp_path)
+    (tmp_path / "routers.yaml").write_text(
+        """routers:
+  mikrotik-afe23e:
+    host: 192.168.56.103
+    port: 443
+    tls:
+      fingerprint: abababababababababababababababababababababababababababababababab
+    credentials:
+      source: env
+      envPrefix: ROUTER_MIKROTIK_AFE23E
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        'ROUTER_MIKROTIK_AFE23E_USER="admin"\n'
+        'ROUTER_MIKROTIK_AFE23E_PASS="legacy-secret"\n',
+        encoding="utf-8",
+    )
+
+    environment = store.runtime_environment()
+
+    assert environment["ROUTER_MIKROTIK_AFE23E_USER"] == "admin"
+    assert environment["ROUTER_MIKROTIK_AFE23E_PASS"] == "legacy-secret"
+    assert "legacy-secret" not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert store.ssh_target("mikrotik-afe23e").password == "legacy-secret"
+
+
+def test_runtime_environment_rejects_credential_prefix_collisions(tmp_path) -> None:
+    store = _store(tmp_path)
+    (tmp_path / "routers.yaml").write_text(
+        """routers:
+  first:
+    host: 192.0.2.1
+    credentials: {envPrefix: ROUTER_SHARED}
+  second:
+    host: 192.0.2.2
+    credentials: {envPrefix: ROUTER_SHARED}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="prefix collision"):
+        store.runtime_environment()
+
+
 def test_prepare_rejects_routeros_6_before_network_access(tmp_path) -> None:
     called = False
 
@@ -149,7 +221,7 @@ def test_prepare_rejects_routeros_6_before_network_access(tmp_path) -> None:
         return "ab" * 32
 
     service = RegistrationService(
-        store=MikroMcpConfigStore(ConfigPaths(root=tmp_path)),
+        store=_store(tmp_path),
         capture_fingerprint=capture,
     )
 
@@ -166,7 +238,7 @@ def test_prepare_rejects_routeros_6_before_network_access(tmp_path) -> None:
 
 
 def test_prepare_hard_stops_on_changed_tls_fingerprint(tmp_path) -> None:
-    store = MikroMcpConfigStore(ConfigPaths(root=tmp_path))
+    store = _store(tmp_path)
     store.persist(
         PendingRegistration(
             router_id="mikrotik-afe23e",
@@ -220,7 +292,7 @@ def test_registration_uses_live_catalog_health_and_system_status(tmp_path) -> No
             return inspection
 
     service = RegistrationService(
-        store=MikroMcpConfigStore(ConfigPaths(root=tmp_path)),
+        store=_store(tmp_path),
         client_factory=lambda _environment: FakeClient(),
     )
     pending = PendingRegistration(
@@ -238,3 +310,83 @@ def test_registration_uses_live_catalog_health_and_system_status(tmp_path) -> No
     assert result.identity == "MikroTik"
     assert result.tool_count == 3
     assert result.health["healthy"] is True
+
+
+def test_registration_restores_files_when_backend_health_fails(tmp_path) -> None:
+    store = _store(tmp_path)
+    (tmp_path / "routers.yaml").write_text("routers: {}\n", encoding="utf-8")
+    (tmp_path / "identities.yaml").write_text("identities: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text('KEEP="yes"\n', encoding="utf-8")
+    before = {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "routers.yaml", tmp_path / "identities.yaml", tmp_path / ".env")
+    }
+
+    class FailingClient:
+        async def inspect_router(self, _router_id: str) -> BackendInspection:
+            return BackendInspection(
+                tools=(),
+                health=McpToolResult(("unhealthy",), {"healthy": False}, True),
+                system_status=McpToolResult((), {}, False),
+            )
+
+    service = RegistrationService(
+        store=store,
+        client_factory=lambda _environment: FailingClient(),
+    )
+    pending = PendingRegistration(
+        router_id="mikrotik-afe23e",
+        host="192.168.56.103",
+        port=443,
+        username="admin",
+        password="secret",
+        ros_version="7.21.5",
+        tls_fingerprint="ab" * 32,
+    )
+
+    with pytest.raises(RegistrationError) as raised:
+        asyncio.run(service.register_and_verify(pending))
+
+    assert raised.value.code == RegistrationErrorCode.BACKEND_HEALTH_FAILED
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "routers.yaml", tmp_path / "identities.yaml", tmp_path / ".env")
+    } == before
+    assert not (tmp_path / "router-secrets.json").exists()
+
+
+def test_registration_restores_files_when_verification_is_cancelled(tmp_path) -> None:
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        (tmp_path / "routers.yaml").write_text("routers: {}\n", encoding="utf-8")
+        before = (tmp_path / "routers.yaml").read_bytes()
+        started = asyncio.Event()
+
+        class HangingClient:
+            async def inspect_router(self, _router_id: str) -> BackendInspection:
+                started.set()
+                await asyncio.Future()
+                raise AssertionError("unreachable")
+
+        service = RegistrationService(
+            store=store,
+            client_factory=lambda _environment: HangingClient(),
+        )
+        pending = PendingRegistration(
+            router_id="mikrotik-afe23e",
+            host="192.168.56.103",
+            port=443,
+            username="admin",
+            password="secret",
+            ros_version="7.21.5",
+            tls_fingerprint="ab" * 32,
+        )
+        task = asyncio.create_task(service.register_and_verify(pending))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (tmp_path / "routers.yaml").read_bytes() == before
+        assert not (tmp_path / "router-secrets.json").exists()
+
+    asyncio.run(scenario())

@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import tempfile
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from mth.agent.secret_store import ProviderSecretPaths, ProviderSecretStore
 from mth.core.mcp_client.runtime import project_root
 from mth.core.registration.models import PendingRegistration
 from mth.core.runbooks import DEFAULT_RUNBOOK_REGISTRY
@@ -31,6 +33,14 @@ class ConfigPaths:
     @property
     def dotenv(self) -> Path:
         return self.root / ".env"
+
+    @property
+    def router_secrets(self) -> Path:
+        return self.root / "router-secrets.json"
+
+    @property
+    def router_secrets_key(self) -> Path:
+        return self.root / "router-secrets.key"
 
     @property
     def data(self) -> Path:
@@ -85,8 +95,19 @@ class MikroMcpConfigStore:
         *DEFAULT_RUNBOOK_REGISTRY.write_tools,
     )
 
-    def __init__(self, paths: ConfigPaths | None = None) -> None:
+    def __init__(
+        self,
+        paths: ConfigPaths | None = None,
+        *,
+        router_secret_store: ProviderSecretStore | None = None,
+    ) -> None:
         self.paths = paths or ConfigPaths()
+        self._router_secrets = router_secret_store or ProviderSecretStore(
+            ProviderSecretPaths(
+                file=self.paths.router_secrets,
+                key_file=self.paths.router_secrets_key,
+            )
+        )
 
     def trusted_fingerprint(self, host: str) -> tuple[str, str] | None:
         routers = self._load_yaml(self.paths.routers, "routers")
@@ -101,7 +122,28 @@ class MikroMcpConfigStore:
         """Load the private child-process environment without exposing it to the UI."""
 
         self._ensure_operator_policy()
-        return self._load_dotenv()
+        persisted_environment = self._load_dotenv()
+        environment = dict(persisted_environment)
+        routers = self._load_yaml(self.paths.routers, "routers")
+        self._validate_credential_prefixes(routers)
+        for router_id, entry in routers.items():
+            if not isinstance(entry, dict):
+                continue
+            credentials = entry.get("credentials")
+            prefix = credentials.get("envPrefix") if isinstance(credentials, dict) else None
+            if not isinstance(prefix, str) or not prefix:
+                continue
+            resolved = self._router_credentials(router_id, prefix, environment)
+            if resolved is None:
+                continue
+            username, password, _was_migrated = resolved
+            environment[f"{prefix}_USER"] = username
+            environment[f"{prefix}_PASS"] = password
+        persisted = dict(environment)
+        self._remove_router_credentials_from_environment(persisted, routers)
+        if persisted != persisted_environment:
+            self._write_dotenv(persisted)
+        return environment
 
     def ssh_target(self, router_id: str) -> SshTarget:
         """Resolve SSH credentials locally without exposing them to UI or model context."""
@@ -117,7 +159,7 @@ class MikroMcpConfigStore:
         prefix = credentials.get("envPrefix")
         if not isinstance(prefix, str) or not prefix:
             raise ValueError(f"Router {router_id!r} has no credential environment prefix")
-        environment = self._load_dotenv()
+        environment = self.runtime_environment()
         username = environment.get(f"{prefix}_USER")
         password = environment.get(f"{prefix}_PASS")
         if not username or not password:
@@ -180,6 +222,20 @@ class MikroMcpConfigStore:
 
         routers = self._load_yaml(self.paths.routers, "routers")
         prefix = self._env_prefix(pending.router_id)
+        self._validate_credential_prefixes(routers)
+        for router_id, entry in routers.items():
+            if router_id == pending.router_id:
+                continue
+            if isinstance(entry, dict) and self._credential_prefix(entry) == prefix:
+                raise ValueError(
+                    f"Router credential environment prefix collision: {prefix!r}"
+                )
+        environment = self._load_dotenv()
+        self._migrate_legacy_credentials(environment, routers)
+        self._remove_router_credentials_from_environment(environment, routers)
+        self._router_secrets.set(self._secret_id(pending.router_id, "username"), pending.username)
+        self._router_secrets.set(self._secret_id(pending.router_id, "password"), pending.password)
+        self._remove_legacy_credentials(environment, prefix)
         routers[pending.router_id] = {
             "host": pending.host,
             "port": pending.port,
@@ -203,11 +259,8 @@ class MikroMcpConfigStore:
         }
         self._write_yaml(self.paths.identities, {"identities": identities})
 
-        env = self._load_dotenv()
-        env[f"{prefix}_USER"] = pending.username
-        env[f"{prefix}_PASS"] = pending.password
-        env.setdefault("MIKROMCP_CONFIRMATION_SECRET", secrets.token_hex(32))
-        env.update(
+        environment.setdefault("MIKROMCP_CONFIRMATION_SECRET", secrets.token_hex(32))
+        environment.update(
             {
                 "MIKROMCP_CONFIG_PATH": str(self.paths.routers.resolve()),
                 "MIKROMCP_IDENTITIES_PATH": str(self.paths.identities.resolve()),
@@ -218,8 +271,110 @@ class MikroMcpConfigStore:
                 "MIKROMCP_LOG_LEVEL": "warn",
             }
         )
-        self._write_dotenv(env)
-        return env
+        self._write_dotenv(environment)
+        return self.runtime_environment()
+
+    def snapshot_registration_state(self) -> dict[Path, bytes | None]:
+        """Capture files changed by registration so failed verification can be undone."""
+
+        paths = (
+            self.paths.routers,
+            self.paths.identities,
+            self.paths.dotenv,
+            self.paths.router_secrets,
+            self.paths.router_secrets_key,
+        )
+        return {path: path.read_bytes() if path.is_file() else None for path in paths}
+
+    def restore_registration_state(self, snapshot: Mapping[Path, bytes | None]) -> None:
+        for path, content in snapshot.items():
+            if content is None:
+                with suppress(FileNotFoundError):
+                    path.unlink()
+            else:
+                self._atomic_write_bytes(path, content)
+
+    def _migrate_legacy_credentials(
+        self,
+        environment: dict[str, str],
+        routers: dict[str, Any],
+    ) -> None:
+        for router_id, entry in routers.items():
+            if not isinstance(entry, dict):
+                continue
+            credentials = entry.get("credentials")
+            prefix = credentials.get("envPrefix") if isinstance(credentials, dict) else None
+            if isinstance(prefix, str) and prefix:
+                self._router_credentials(router_id, prefix, environment)
+
+    @classmethod
+    def _remove_router_credentials_from_environment(
+        cls,
+        environment: dict[str, str],
+        routers: Mapping[str, Any],
+    ) -> None:
+        for entry in routers.values():
+            if not isinstance(entry, dict):
+                continue
+            credentials = entry.get("credentials")
+            prefix = credentials.get("envPrefix") if isinstance(credentials, dict) else None
+            if isinstance(prefix, str) and prefix:
+                cls._remove_legacy_credentials(environment, prefix)
+
+    def _router_credentials(
+        self,
+        router_id: str,
+        prefix: str,
+        environment: Mapping[str, str],
+    ) -> tuple[str, str, bool] | None:
+        username = self._router_secrets.get(self._secret_id(router_id, "username"))
+        password = self._router_secrets.get(self._secret_id(router_id, "password"))
+        if username is not None and password is not None:
+            had_legacy = (
+                f"{prefix}_USER" in environment or f"{prefix}_PASS" in environment
+            )
+            self._remove_legacy_credentials(environment, prefix)
+            return username, password, had_legacy
+
+        legacy_username = environment.get(f"{prefix}_USER")
+        legacy_password = environment.get(f"{prefix}_PASS")
+        if legacy_username and legacy_password:
+            self._router_secrets.set(self._secret_id(router_id, "username"), legacy_username)
+            self._router_secrets.set(self._secret_id(router_id, "password"), legacy_password)
+            self._remove_legacy_credentials(environment, prefix)
+            return legacy_username, legacy_password, True
+        return None
+
+    @staticmethod
+    def _remove_legacy_credentials(environment: Mapping[str, str], prefix: str) -> None:
+        if isinstance(environment, dict):
+            environment.pop(f"{prefix}_USER", None)
+            environment.pop(f"{prefix}_PASS", None)
+
+    @staticmethod
+    def _secret_id(router_id: str, kind: str) -> str:
+        return f"router:{router_id}:{kind}"
+
+    @classmethod
+    def _validate_credential_prefixes(cls, routers: Mapping[str, Any]) -> None:
+        owners: dict[str, str] = {}
+        for router_id, entry in routers.items():
+            if not isinstance(entry, dict):
+                continue
+            prefix = cls._credential_prefix(entry)
+            if prefix is None:
+                continue
+            owner = owners.setdefault(prefix, router_id)
+            if owner != router_id:
+                raise ValueError(
+                    f"Router credential environment prefix collision: {prefix!r}"
+                )
+
+    @staticmethod
+    def _credential_prefix(entry: Mapping[str, Any]) -> str | None:
+        credentials = entry.get("credentials")
+        prefix = credentials.get("envPrefix") if isinstance(credentials, dict) else None
+        return prefix if isinstance(prefix, str) and prefix else None
 
     def _ensure_operator_policy(self) -> None:
         """Migrate an existing local identity to the reviewed runbook allowlist."""
@@ -280,6 +435,20 @@ class MikroMcpConfigStore:
         handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
         try:
             with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(handle, "wb") as stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())

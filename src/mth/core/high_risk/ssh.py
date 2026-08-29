@@ -56,6 +56,7 @@ class RouterOsSshSession:
         self._alive = True
         self._safe_mode_active = False
         self._command_count = 0
+        self._safe_mode_action_count: int | None = None
         self._term_rows = 48
         self._term_cols = 160
         self._cursor_row = 1
@@ -111,6 +112,12 @@ class RouterOsSshSession:
         return self._command_count
 
     @property
+    def safe_mode_action_count(self) -> int | None:
+        """Best-effort count of RouterOS floating-undo actions in Safe Mode."""
+
+        return self._safe_mode_action_count
+
+    @property
     def alive(self) -> bool:
         return self._alive
 
@@ -143,6 +150,8 @@ class RouterOsSshSession:
                 await self._close_transport()
                 return False
             self._safe_mode_active = "<safe>" in raw.casefold()
+            if self._safe_mode_active:
+                self._safe_mode_action_count = 0
             return self._safe_mode_active
 
     async def execute(
@@ -179,6 +188,8 @@ class RouterOsSshSession:
                     "", "connection_lost", started, False, error_detail=detail
                 )
             self._command_count += 1
+            if self._safe_mode_active:
+                await self._refresh_safe_mode_action_count()
             status = "truncated" if truncated else "ok"
             return self._result(raw, status, started, truncated, command=command, marker=marker)
 
@@ -203,6 +214,7 @@ class RouterOsSshSession:
             released = self._prompt_is_safe(raw + marker_output) is False
             if released:
                 self._safe_mode_active = False
+                self._safe_mode_action_count = None
                 await self._close_transport()
             return released
 
@@ -215,6 +227,7 @@ class RouterOsSshSession:
                     await self._write(b"\x03\x04")
             await self._close_transport()
             self._safe_mode_active = False
+            self._safe_mode_action_count = None
 
     async def restore_backup(self, local_backup: Path, remote_name: str, password: str) -> None:
         """Upload and load a binary backup; reboot-induced disconnect is expected success."""
@@ -252,6 +265,18 @@ class RouterOsSshSession:
                 f"Could not download RouterOS artifact {remote_name!r}: {error}"
             ) from error
 
+    async def delete_remote(self, remote_name: str) -> None:
+        """Delete a pre-flight artifact through the already pinned SSH channel."""
+
+        try:
+            sftp = await self._connection.start_sftp_client()
+            async with sftp:
+                await sftp.remove(remote_name)
+        except (asyncssh.Error, OSError) as error:
+            raise HighRiskError(
+                f"Could not delete RouterOS artifact {remote_name!r}: {error}"
+            ) from error
+
     async def _timeout_result(self, started: float, max_output_bytes: int) -> SshExecResult:
         """Cancel, then re-synchronise. A failed re-sync closes a desynchronised PTY."""
 
@@ -270,6 +295,47 @@ class RouterOsSshSession:
                 error_detail=self._last_transport_error,
             )
         return self._result("", "timeout", started, False)
+
+    async def _refresh_safe_mode_action_count(self) -> None:
+        """Read RouterOS' floating-undo history without adding a model command."""
+
+        marker = self._marker()
+        try:
+            await self._write(
+                b"/system history print detail\r\n" + self._marker_command(marker)
+            )
+            raw, _ = await self._read_until_marker(marker, 5, 32_768)
+        except (asyncssh.Error, OSError, ConnectionError, TimeoutError) as error:
+            # A missing frame leaves the PTY state untrusted just like any
+            # other transport failure; close it rather than continuing under
+            # an unverified Safe Mode state.
+            self._mark_transport_lost(self._transport_diagnostic(error))
+            await self._close_transport()
+            self._safe_mode_action_count = None
+            return
+        self._safe_mode_action_count = self._count_floating_undo(raw)
+
+    async def refresh_safe_mode_action_count(self) -> int | None:
+        """Refresh the Safe Mode counter after a change made outside this PTY.
+
+        MikroMCP writes use its REST connection, but RouterOS Safe Mode history
+        is shared across sessions.  Keep the displayed counter honest without
+        making the model spend a tool round on an internal history read.
+        """
+
+        async with self._lock:
+            if not self._alive or not self._safe_mode_active:
+                return None
+            await self._refresh_safe_mode_action_count()
+            return self._safe_mode_action_count
+
+    @classmethod
+    def _count_floating_undo(cls, raw: str) -> int:
+        normalized = cls._ANSI.sub("", raw.replace("\x9b", "\x1b["))
+        return sum(
+            1 for line in normalized.replace("\r", "").splitlines()
+            if re.match(r"^\s*F(?:\s|$)", line)
+        )
 
     async def _read_until_text(
         self,
@@ -666,6 +732,7 @@ class RouterOsSshSession:
             execution_time=round(time.monotonic() - started, 3),
             output_truncated=truncated,
             command_count=self._command_count,
+            safe_mode_action_count=self._safe_mode_action_count,
             error_detail=error_detail,
         )
 

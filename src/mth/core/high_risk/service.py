@@ -72,6 +72,7 @@ class HighRiskSession:
             "execution_time": result.execution_time,
             "output_truncated": result.output_truncated,
             "command_count": result.command_count,
+            "safe_mode_action_count": result.safe_mode_action_count,
             "error_detail": result.error_detail,
         }
         content = (result.cleaned_output or result.status,)
@@ -86,6 +87,11 @@ class HighRiskSession:
 
     async def abort_and_close(self) -> None:
         await self.ssh.abort_and_close()
+
+    async def refresh_safe_mode_action_count(self) -> int | None:
+        """Refresh shared Safe Mode history after a REST/MikroMCP write."""
+
+        return await self.ssh.refresh_safe_mode_action_count()
 
     async def restore_full_backup(self) -> None:
         password = self._secrets_store.get(self.artifacts.backup_secret_id)
@@ -104,13 +110,14 @@ class HighRiskService:
         *,
         backend_factory: Callable[[], BackupBackend] | None = None,
         connection_factory: ConnectionFactory | None = None,
+        secrets_store: ProviderSecretStore | None = None,
     ) -> None:
         self._store = store or MikroMcpConfigStore()
         self._backend_factory = backend_factory or self._default_backend
         self._connection_factory = connection_factory or RouterOsSshSession.open
         root = self._store.paths.root.parent
         self._backup_root = root / "high-risk-backups"
-        self._secrets = ProviderSecretStore(
+        self._secrets = secrets_store or ProviderSecretStore(
             ProviderSecretPaths(
                 file=root / "high-risk-secrets.json",
                 key_file=root / "high-risk-secrets.key",
@@ -171,6 +178,11 @@ class HighRiskService:
             await session.download(artifacts.export_remote_name, artifacts.export_path)
             self._verify_artifact(artifacts.backup_path)
             self._verify_artifact(artifacts.export_path)
+            delete_remote = getattr(session, "delete_remote", None)
+            if callable(delete_remote):
+                for remote_name in (artifacts.backup_remote_name, artifacts.export_remote_name):
+                    with suppress(Exception):
+                        await delete_remote(remote_name)
             self._write_manifest(artifacts, host_key)
             if not await session.enter_safe_mode():
                 raise HighRiskError(
@@ -248,10 +260,17 @@ class HighRiskService:
         if backend is not None:
             for remote_name in (artifacts.backup_remote_name, artifacts.export_remote_name):
                 with suppress(Exception):
-                    await backend.call_tool(
-                        "delete_file",
-                        {"routerId": artifacts.router_id, "name": remote_name, "dryRun": False},
-                    )
+                    arguments = {
+                        "routerId": artifacts.router_id,
+                        "name": remote_name,
+                        "dryRun": False,
+                    }
+                    result = await backend.call_tool("delete_file", arguments)
+                    if result.confirmation_token is not None:
+                        await backend.call_tool(
+                            "delete_file",
+                            {**arguments, "confirmationToken": result.confirmation_token},
+                        )
 
         for local_path in (
             artifacts.backup_path,

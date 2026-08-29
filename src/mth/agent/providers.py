@@ -303,13 +303,18 @@ class OpenAICompatibleClient:
                         if isinstance(raw_call.get("id"), str):
                             entry["id"] = raw_call["id"]
                         function = raw_call.get("function")
-                        if isinstance(function, dict):
-                            if isinstance(function.get("name"), str):
-                                entry["name"] = function["name"]
-                            if isinstance(function.get("arguments"), str):
-                                entry["arguments"] += function["arguments"]
+                        if not isinstance(function, dict):
+                            continue
+                        if isinstance(function.get("name"), str):
+                            entry["name"] = function["name"]
+                        if isinstance(function.get("arguments"), str):
+                            entry["arguments"] += function["arguments"]
         finally:
-            await task
+            # ``to_thread`` cannot interrupt a blocking socket read.  Do not
+            # keep a cancelled UI worker waiting for the provider timeout; the
+            # daemon thread will finish and close its response independently.
+            if not task.done():
+                task.cancel()
 
         tool_calls: list[ProviderToolCall] = []
         for index in sorted(calls):

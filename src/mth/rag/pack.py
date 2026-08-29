@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import tempfile
 import time
@@ -27,6 +29,8 @@ SCHEMA_VERSION = 1
 PACK_ENV = "MTH_RAG_HOME"
 DEFAULT_MAX_CHUNK_CHARS = 2_400
 DEFAULT_MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_DOCUMENTS = 4_000
+DEFAULT_MAX_TOTAL_DOWNLOAD_BYTES = 256 * 1024 * 1024
 DOWNLOAD_ATTEMPTS = 4
 
 Fetcher = Callable[[str], bytes | str]
@@ -164,6 +168,7 @@ def load_or_build(
 
 def fetch_url(url: str) -> bytes:
     """Fetch one bounded source using only the standard library."""
+    _validate_source_url(url, url, resolve_host=True)
     request = Request(url, headers={"User-Agent": "mikrotik-harness-rag/0.1"})
     failure: OSError | HTTPException
     for attempt in range(DOWNLOAD_ATTEMPTS):
@@ -171,6 +176,8 @@ def fetch_url(url: str) -> bytes:
             with urlopen(  # noqa: S310 - caller controls source URL
                 request, timeout=30
             ) as response:
+                final_url = getattr(response, "geturl", lambda: url)()
+                _validate_source_url(str(final_url), url, resolve_host=True)
                 payload = bytes(response.read(DEFAULT_MAX_DOWNLOAD_BYTES + 1))
             break
         except HTTPError as error:
@@ -234,6 +241,7 @@ def _write_pack(
     source_name: str,
     max_chunk_chars: int,
 ) -> None:
+    _validate_source_url(index_url, index_url)
     source_dir = path / "sources"
     source_dir.mkdir(parents=True)
     index_bytes = _as_bytes(fetcher(index_url))
@@ -242,14 +250,25 @@ def _write_pack(
     pages = _index_pages(index_bytes.decode("utf-8", errors="replace"), index_url)
     if not pages:
         raise PackError(f"no Markdown page links found in RAG index: {index_url}")
+    if len(pages) > DEFAULT_MAX_DOCUMENTS:
+        raise PackError(
+            f"RAG index contains {len(pages)} pages; maximum is {DEFAULT_MAX_DOCUMENTS}"
+        )
 
     database_path = path / "content.sqlite3"
     documents: list[dict[str, str]] = []
     chunk_count = 0
+    total_download_bytes = len(index_bytes)
     with closing(sqlite3.connect(database_path)) as connection:
         _create_schema(connection)
         for ordinal, (label, url) in enumerate(pages, start=1):
             payload = _as_bytes(fetcher(url))
+            total_download_bytes += len(payload)
+            if total_download_bytes > DEFAULT_MAX_TOTAL_DOWNLOAD_BYTES:
+                raise PackError(
+                    "RAG corpus exceeds "
+                    f"{DEFAULT_MAX_TOTAL_DOWNLOAD_BYTES} total downloaded bytes"
+                )
             text = payload.decode("utf-8", errors="replace")
             filename = f"{ordinal:04d}-{_safe_name(url)}.md"
             local_path = f"sources/{filename}"
@@ -396,12 +415,94 @@ def _index_pages(text: str, index_url: str) -> tuple[tuple[str, str], ...]:
         label, link = match.groups()
         url = urljoin(index_url, link.strip())
         parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.path.lower().endswith(".md"):
+        if not parsed.path.lower().endswith(".md"):
+            continue
+        try:
+            _validate_source_url(url, index_url)
+        except PackError:
             continue
         if url not in seen:
             seen.add(url)
             pages.append((label.strip(), url))
     return tuple(pages)
+
+
+def _validate_source_url(
+    url: str,
+    origin_url: str,
+    *,
+    resolve_host: bool = False,
+) -> None:
+    try:
+        parsed = urlparse(url)
+        origin = urlparse(origin_url)
+        hostname = parsed.hostname
+        origin_hostname = origin.hostname
+    except ValueError as error:
+        raise PackError(f"invalid RAG source URL: {url}") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise PackError(f"RAG source URL is not a safe HTTP(S) URL: {url}")
+    if origin_hostname is None or _origin(parsed) != _origin(origin):
+        raise PackError(f"RAG source must stay on the index origin: {url}")
+    loopback = _is_loopback_host(hostname)
+    if parsed.scheme == "http" and not loopback:
+        raise PackError("plain HTTP RAG sources are allowed only on loopback")
+    if _is_private_literal(hostname) and not loopback:
+        raise PackError(f"private or local RAG source is blocked: {url}")
+    if resolve_host:
+        try:
+            addresses = {
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(
+                    hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+            }
+        except (OSError, ValueError) as error:
+            raise PackError(f"could not resolve RAG source host: {hostname}") from error
+        if not addresses or (
+            any(not address.is_loopback for address in addresses)
+            if loopback
+            else any(not address.is_global for address in addresses)
+        ):
+            raise PackError(f"RAG source host resolves to a private or local address: {hostname}")
+
+
+def _origin(parsed: Any) -> tuple[str, str, int]:
+    scheme = str(parsed.scheme).casefold()
+    hostname = str(parsed.hostname).casefold()
+    port = parsed.port or (443 if scheme == "https" else 80)
+    return scheme, hostname, port
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_private_literal(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return (
+        address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+    )
 
 
 def _chunk_markdown(text: str, *, max_chunk_chars: int) -> Iterable[tuple[str, str]]:

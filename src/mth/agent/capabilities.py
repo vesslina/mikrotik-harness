@@ -75,8 +75,20 @@ class ProviderPreset:
         if not self.model.strip():
             raise ValueError("model name must not be empty")
         parsed = urlparse(self.base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        try:
+            _ = parsed.port
+        except ValueError as error:
+            raise ValueError("base_url must be an absolute HTTP(S) URL") from error
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
             raise ValueError("base_url must be an absolute HTTP(S) URL")
+        if parsed.scheme == "http" and not self.is_loopback_endpoint:
+            raise ValueError("HTTP provider endpoints are allowed only on loopback")
         if self.api_key_env is not None and not re.fullmatch(
             r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env
         ):

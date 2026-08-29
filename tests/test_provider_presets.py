@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from mth.agent import (
     ModelCapabilities,
     PresetPaths,
@@ -11,6 +13,7 @@ from mth.agent import (
     ReasoningControl,
     ToolCallFormat,
 )
+from mth.agent import secret_store as secret_store_module
 
 
 class _Protector:
@@ -105,8 +108,62 @@ def test_old_preset_defaults_sensitive_tool_data_to_protected(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    selected = ProviderPresetStore(PresetPaths(file=path)).selected()
+    selected = ProviderPresetStore(
+        PresetPaths(file=path),
+        ProviderSecretStore(
+            ProviderSecretPaths(
+                file=tmp_path / "provider-secrets.json",
+                key_file=tmp_path / "provider-secrets.key",
+            ),
+            protector=_Protector(),
+        ),
+    ).selected()
 
     assert selected is not None
     assert selected.allow_sensitive_tool_data is False
     assert selected.capabilities.supports_streaming is True
+
+
+def test_windows_secret_store_fails_closed_when_dpapi_is_unavailable(monkeypatch, tmp_path) -> None:
+    class BrokenDpapi:
+        def __init__(self) -> None:
+            raise OSError("DPAPI unavailable")
+
+    monkeypatch.setattr(secret_store_module.os, "name", "nt")
+    monkeypatch.setattr(secret_store_module, "WindowsDpapiProtector", BrokenDpapi)
+
+    store = ProviderSecretStore(
+        ProviderSecretPaths(
+            file=tmp_path / "secrets.json",
+            key_file=tmp_path / "secrets.key",
+        )
+    )
+    with pytest.raises(RuntimeError, match="DPAPI is unavailable"):
+        store.set("provider", "secret")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "https://user:secret@example.test/v1",
+        "https://example.test/v1#secret",
+        "https://example.test:bad/v1",
+    ),
+)
+def test_provider_url_cannot_embed_credentials_or_fragments(base_url: str) -> None:
+    with pytest.raises(ValueError, match=r"absolute HTTP\(S\) URL"):
+        ProviderPreset(
+            name="unsafe",
+            provider=ProviderKind.OPENAI_COMPATIBLE,
+            base_url=base_url,
+            model="vendor/model",
+            capabilities=ModelCapabilities(
+                supports_tools=True,
+                supports_streaming=True,
+                supports_reasoning=False,
+                supports_json_schema=False,
+                max_context_tokens=2_000,
+                reasoning_control=ReasoningControl.NONE,
+                tool_call_format=ToolCallFormat.OPENAI,
+            ),
+        )

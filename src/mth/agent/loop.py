@@ -74,6 +74,8 @@ class HighRiskSshExecutor(Protocol):
         max_output_bytes: int = 65_536,
     ) -> McpToolResult: ...
 
+    async def refresh_safe_mode_action_count(self) -> int | None: ...
+
 
 class ReadOnlyAgentLoop:
     """Provider-neutral loop with read tools and harness-owned runbook proposals."""
@@ -473,9 +475,32 @@ class ReadOnlyAgentLoop:
                         call.name,
                         {**arguments, "confirmationToken": result.confirmation_token},
                     )
+                safety_lost = (
+                    mode is AgentMode.HIGH_RISK
+                    and risk is not RiskLevel.READ_ONLY
+                    and not await self._refresh_high_risk_safe_mode_count()
+                )
+                if safety_lost:
+                    result = McpToolResult(
+                        (*result.content, "HIGH RISK SSH safety channel was lost."),
+                        {
+                            "status": "connection_lost",
+                            "session_alive": False,
+                            "safe_mode_active": False,
+                        },
+                        True,
+                    )
                 safe_result = self._model_safe_result(result)
                 self._progress(events, self._result_event(call, safe_result))
                 messages.append(self._tool_message(call, safe_result))
+                if safety_lost:
+                    events.append(
+                        FinalSummary(
+                            "HIGH RISK safety channel was lost; no further changes were attempted.",
+                            FinalOutcome.STOPPED,
+                        )
+                    )
+                    return tuple(events)
 
         summary = "Stopped after the maximum number of agent tool rounds."
         events.append(FinalSummary(summary, FinalOutcome.STOPPED))
@@ -686,6 +711,22 @@ class ReadOnlyAgentLoop:
             return await executor.execute(command, timeout, max_output)
         except (OSError, ValueError) as error:
             return McpToolResult((f"ssh_exec failed: {error}",), None, True)
+
+    async def _refresh_high_risk_safe_mode_count(self) -> bool:
+        """Account for REST/MikroMCP writes in the shared Safe Mode history."""
+
+        executor = self._high_risk_ssh
+        refresh = getattr(executor, "refresh_safe_mode_action_count", None)
+        if not callable(refresh):
+            return True
+        count = await refresh()
+        if count is not None:
+            return True
+        channel = getattr(executor, "ssh", executor)
+        return (
+            getattr(channel, "alive", True) is not False
+            and getattr(channel, "safe_mode_active", True) is not False
+        )
 
     @property
     def _rag_search_tool(self) -> McpTool:

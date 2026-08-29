@@ -1048,15 +1048,7 @@ class ChatScreen(Screen[None]):
             self._write_system(f"Could not load model presets: {error}", error=True)
             selected = None
         if selected is not None:
-            try:
-                api_key = self._preset_store.api_key(selected)
-            except (OSError, ValueError) as error:
-                self._write_system(
-                    f"Could not decrypt the saved API key: {error}. "
-                    "Re-enter it with /model.",
-                    error=True,
-                )
-                api_key = None
+            api_key = self._saved_api_key(selected)
             self._activate_preset(selected, api_key, persist=False)
         self._refresh_header()
         self._refresh_mode()
@@ -1316,9 +1308,7 @@ class ChatScreen(Screen[None]):
         preset = self._selected_inline_model(index)
         if preset is None:
             return
-        api_key = self._session_api_keys.get(preset.name) or self._preset_store.api_key(
-            preset
-        )
+        api_key = self._session_api_keys.get(preset.name) or self._saved_api_key(preset)
         self._close_inline()
         self._activate_preset(preset, api_key)
 
@@ -1584,9 +1574,13 @@ class ChatScreen(Screen[None]):
         try:
             if commit:
                 if not await session.commit_and_close():
-                    self._write_system(
-                        "Safe Mode release was not verified; HIGH RISK remains active.", error=True
-                    )
+                    if not getattr(getattr(session, "ssh", None), "alive", True):
+                        await self._invalidate_high_risk_session()
+                    else:
+                        self._write_system(
+                            "Safe Mode release was not verified; HIGH RISK remains active.",
+                            error=True,
+                        )
                     return
                 message = (
                     "HIGH RISK changes were committed and the SSH session was closed."
@@ -1923,7 +1917,7 @@ class ChatScreen(Screen[None]):
             if selected is None:
                 self._write_system(f"Preset not found: {requested}", error=True)
                 return
-            self._activate_preset(selected, self._preset_store.api_key(selected))
+            self._activate_preset(selected, self._saved_api_key(selected))
             return
         if not presets:
             self._write_system("No saved presets. Use /model.")
@@ -2049,7 +2043,7 @@ class ChatScreen(Screen[None]):
                 amend=lambda: self._show_model_picker(self._model_picker_presets),
             )
             return
-        api_key = self._session_api_keys.get(preset.name) or self._preset_store.api_key(preset)
+        api_key = self._session_api_keys.get(preset.name) or self._saved_api_key(preset)
         self._activate_preset(preset, api_key)
 
     def _model_delete_approved(self, approved: bool | None) -> None:
@@ -2087,7 +2081,7 @@ class ChatScreen(Screen[None]):
             agent = self._agent_factory(preset, api_key)
             if persist:
                 self._preset_store.save(preset, api_key=api_key)
-        except (OSError, ValueError) as error:
+        except (OSError, RuntimeError, ValueError) as error:
             self._write_system(f"Model preset failed: {error}", error=True)
             return
         if api_key:
@@ -2112,6 +2106,16 @@ class ChatScreen(Screen[None]):
         warm_up = getattr(agent, "warm_up", None)
         if callable(warm_up):
             self._warm_up_model()
+
+    def _saved_api_key(self, preset: ProviderPreset) -> str | None:
+        try:
+            return self._preset_store.api_key(preset)
+        except (OSError, RuntimeError, ValueError) as error:
+            self._write_system(
+                f"Could not decrypt the saved API key: {error}. Re-enter it with /model.",
+                error=True,
+            )
+            return None
 
     def _default_agent_factory(
         self,
@@ -2620,7 +2624,7 @@ class ChatScreen(Screen[None]):
         """Return whether a direct CLI call proved the elevated channel unusable."""
 
         for event in events:
-            if not isinstance(event, ToolResult) or event.tool_name != "ssh_exec":
+            if not isinstance(event, ToolResult):
                 continue
             structured = event.structured_content
             if not isinstance(structured, dict):
@@ -2986,8 +2990,22 @@ class ChatScreen(Screen[None]):
             label = tr(self._language, "chat.ready")
         else:
             session = self._high_risk_session
-            action_count = session.ssh.command_count if session is not None else 0
-            label = f"{tr(self._language, 'chat.high_risk')} · SAFE · {action_count}/100 actions"
+            history_count = (
+                getattr(session.ssh, "safe_mode_action_count", None)
+                if session is not None
+                else None
+            )
+            action_count = (
+                history_count
+                if isinstance(history_count, int)
+                else session.ssh.command_count if session is not None else 0
+            )
+            count_label = (
+                f"{action_count}/100 actions"
+                if isinstance(history_count, int)
+                else f"{action_count} SSH commands"
+            )
+            label = f"{tr(self._language, 'chat.high_risk')} · SAFE · {count_label}"
         mode_line.set_class(self._mode is AgentMode.HIGH_RISK, "high-risk")
         warning = ""
         if self._mode is AgentMode.HIGH_RISK and action_count >= SAFE_MODE_ACTION_CRITICAL:
