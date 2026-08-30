@@ -2,7 +2,7 @@ from enum import StrEnum
 
 
 class DiscoveryErrorCode(StrEnum):
-    """Stable Block A error codes exposed to callers and the CLI."""
+    """Stable discovery error codes exposed to callers and the CLI."""
 
     SOCKET_ERROR = "DISCOVERY_SOCKET_ERROR"
     TIMEOUT = "DISCOVERY_TIMEOUT"

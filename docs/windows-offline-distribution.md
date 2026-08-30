@@ -9,13 +9,14 @@ The field edition will be a self-contained, per-user ZIP bundle installed by one
 It will not copy a development virtual environment and will not compile anything on the target
 computer.
 
-Two release candidates are built from the same commit:
+The builder can produce two release candidates from the same commit:
 
 - `MikroTikHarness-<version>-win-x64-py312.zip` — primary field build;
 - `MikroTikHarness-<version>-win-x64-py311.zip` — compatibility build and test artifact.
 
 Each bundle contains one Python version. Shipping both interpreters in one installer adds size and
-branches without improving the operator workflow.
+branches without improving the operator workflow. The current field-tested beta artifact is the
+CPython 3.11 bundle; publish the 3.12 artifact only after its clean-machine acceptance row passes.
 
 ## Target machine
 

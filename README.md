@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-e05d44.svg" alt="version 0.1.0"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-1.0.0b1-e05d44.svg" alt="version 1.0.0 beta 1"></a>
+  <img src="https://img.shields.io/badge/status-open%20beta-f39c12.svg" alt="open beta">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6.svg" alt="Windows 10 or 11">
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB.svg" alt="Python 3.11 or 3.12">
@@ -23,6 +24,9 @@
 MikroTik Harness (`mth`) is a community CLI project that gives an LLM agent a practical,
 mode-controlled workspace for MikroTik RouterOS. It discovers a router, connects a model, exposes
 the appropriate tools, records the session, and keeps the operator in control of changes.
+
+**1.0.0 beta 1** is intended for supervised field testing. Keep a normal RouterOS recovery path
+available and report reproducible failures with the local audit transcript.
 
 The typed RouterOS backend comes from
 [MikroMCP](https://github.com/AliKarami/MikroMCP) ([official site](https://mikromcp.com/)).
@@ -209,7 +213,7 @@ and the optional manual pack. Do not publish this directory.
 ```
 
 Architecture and safety details are in
-[`docs/block-b-architecture.md`](docs/block-b-architecture.md),
+[`docs/architecture.md`](docs/architecture.md),
 [`docs/high-risk-mode.md`](docs/high-risk-mode.md), and
 [`docs/rag-packs.md`](docs/rag-packs.md).
 

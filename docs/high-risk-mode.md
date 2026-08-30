@@ -94,7 +94,7 @@ The portable RouterOS corpus and lexical retrieval foundation are integrated thr
 read-only `search_routeros_docs` agent tool. Retrieved excerpts are bounded, source-linked and
 marked as untrusted reference evidence; they never replace live inspection or verification. If no
 pack is installed or retrieval is inconclusive, the agent uses CLI help. See
-[rag-packs.md](rag-packs.md) and [high-risk-rag-todo.md](high-risk-rag-todo.md).
+[rag-packs.md](rag-packs.md).
 
 Project-owned field recipes are a separate local collection under `docs/field-recipes/`. HIGH RISK
 can search them with `search_field_recipes`; the loader never follows their HTTP source links and

@@ -98,7 +98,7 @@ class FingerprintScreen(ModalScreen[bool]):
 
 
 class DiscoveryApp(App[None]):
-    """Block A terminal UI for discovery and connection target selection."""
+    """Terminal UI for discovery and connection target selection."""
 
     TITLE = "MikroTik Harness"
     SUB_TITLE = "Discovery and select a RouterOS device"

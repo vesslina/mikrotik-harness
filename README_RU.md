@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.1.0-e05d44.svg" alt="версия 0.1.0"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-1.0.0b1-e05d44.svg" alt="версия 1.0.0 beta 1"></a>
+  <img src="https://img.shields.io/badge/status-open%20beta-f39c12.svg" alt="открытая бета">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-007ec6.svg" alt="лицензия MIT"></a>
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D6.svg" alt="Windows 10 или 11">
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB.svg" alt="Python 3.11 или 3.12">
@@ -24,6 +25,9 @@ MikroTik Harness (`mth`) — любительский CLI-проект, кото
 окружение для LLM-агента внутри MikroTik RouterOS. Harness находит роутер, подключает выбранную
 модель, выдаёт ей разрешённые инструменты, показывает ход работы и оставляет изменения под
 контролем оператора.
+
+**1.0.0 beta 1** предназначена для контролируемых полевых испытаний. Сохраняйте обычный путь
+восстановления RouterOS и прикладывайте локальный audit transcript к воспроизводимым ошибкам.
 
 Типизированный RouterOS backend предоставляет
 [MikroMCP](https://github.com/AliKarami/MikroMCP) ([официальный сайт](https://mikromcp.com/)).
@@ -214,7 +218,7 @@ mth discover --broadcast 192.168.56.255
 ```
 
 Архитектура и безопасность описаны в
-[`docs/block-b-architecture.md`](docs/block-b-architecture.md),
+[`docs/architecture.md`](docs/architecture.md),
 [`docs/high-risk-mode.md`](docs/high-risk-mode.md) и
 [`docs/rag-packs.md`](docs/rag-packs.md).
 

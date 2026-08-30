@@ -131,7 +131,7 @@ class MikroMcpClient:
             yield MikroMcpSession(session)
 
     async def inspect_router(self, router_id: str) -> BackendInspection:
-        """Fetch the live catalog and the two read-only Block A/B probes in one session."""
+        """Fetch the live catalog and the two connection probes in one session."""
 
         async with self._session() as session:
             listed = await session.list_tools()

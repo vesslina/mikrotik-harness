@@ -16,7 +16,7 @@ class MndpPacket:
 
 @dataclass(frozen=True, slots=True)
 class DeviceInfo:
-    """An untrusted MNDP self-announcement, normalized for Block A consumers."""
+    """An untrusted MNDP self-announcement normalized for harness consumers."""
 
     mac: str | None = None
     ipv4_addresses: tuple[str, ...] = ()
